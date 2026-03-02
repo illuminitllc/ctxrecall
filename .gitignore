@@ -1,1 +1,7 @@
 /target
+*.db
+*.sqlite
+*.log
+.env*
+.claude/
+docs/

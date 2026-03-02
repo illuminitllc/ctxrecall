@@ -55,6 +55,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "011_label_team_id",
         include_str!("../../migrations/011_label_team_id.sql"),
     ),
+    (
+        "012_document_file_path",
+        include_str!("../../migrations/012_document_file_path.sql"),
+    ),
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection, AppError> {

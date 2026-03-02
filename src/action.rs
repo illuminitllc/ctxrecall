@@ -1,3 +1,5 @@
+use crate::db::config_repo::AccountRow;
+use crate::db::document_repo::Document;
 use crate::tracker::types::{Issue, IssueStatus, IssueUpdate, Label, NewIssue, Team, Project};
 
 #[derive(Debug, Clone, Default)]
@@ -45,6 +47,10 @@ pub enum Action {
     CycleStatus(String),
     ViewTranscripts(String),
     ViewDocuments(String),
+    CreateDocument { issue_id: String, doc_type: String, title: String },
+    SaveDocumentContent { doc_id: String, content: String },
+    DocumentCreated(Document),
+
     SearchQuery(String),
     SearchResults(Vec<crate::db::search_repo::SearchResult>),
 
@@ -56,4 +62,18 @@ pub enum Action {
     OpenProjectFilter,
     SetTeamFilter(Option<String>),                    // team name, None = clear
     SetProjectFilter(Option<String>, Option<String>), // (project, team), None = clear
+
+    // Account management
+    SaveAccount {
+        id: Option<String>,        // None = create, Some = update
+        name: String,
+        provider: String,
+        api_key: String,
+        model: Option<String>,     // LLM only
+        ollama_url: Option<String>, // LLM only
+    },
+    DeleteAccount(String),          // account id
+    SwitchAccount(String),          // account id
+    LoadAccounts,
+    AccountsLoaded(Vec<AccountRow>),
 }

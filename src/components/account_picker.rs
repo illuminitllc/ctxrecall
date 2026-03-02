@@ -83,10 +83,7 @@ impl Component for AccountPicker {
             KeyCode::Enter => {
                 let action = self.state.selected().and_then(|i| {
                     self.accounts.get(i).map(|account| {
-                        Action::StatusMessage(format!(
-                            "Switched to account: {}",
-                            account.name
-                        ))
+                        Action::SwitchAccount(account.id.clone())
                     })
                 });
                 self.hide();

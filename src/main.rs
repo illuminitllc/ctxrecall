@@ -150,10 +150,11 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    // Resolve API key: CLI arg > DB stored > env
+    // Resolve API key: CLI arg > DB config > active account
     let api_key = cli
         .linear_api_key
-        .or_else(|| db::config_repo::get_config(&conn, "linear_api_key").ok().flatten());
+        .or_else(|| db::config_repo::get_config(&conn, "linear_api_key").ok().flatten())
+        .or_else(|| db::config_repo::get_active_api_key(&conn).ok().flatten());
 
     // Create and run app
     let mut app = App::new(conn, data_dir);

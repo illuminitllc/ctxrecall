@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::db::document_repo::Document;
 use crate::tracker::types::Issue;
 
@@ -5,6 +7,7 @@ const TOTAL_CAP: usize = 12_000;
 const DESC_CAP: usize = 2_000;
 const SUMMARY_CAP: usize = 1_500;
 const DOC_CAP: usize = 2_000;
+const PROJECT_DOC_CAP: usize = 1_500;
 const MAX_SUMMARIES: usize = 3;
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -19,12 +22,46 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Build a context prompt from issue data, transcript summaries, and linked documents.
-/// Returns `None` if there's no meaningful content to inject.
+/// Load `.md` and `.txt` files from a project's `docs/` directory.
+/// Returns (filename, content) pairs.
+pub fn load_project_docs(project_dir: &Path) -> Vec<(String, String)> {
+    let docs_dir = project_dir.join("docs");
+    let Ok(entries) = std::fs::read_dir(&docs_dir) else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "md" && ext != "txt" {
+            continue;
+        }
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !content.trim().is_empty() {
+                results.push((filename, content));
+            }
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Build a context prompt from issue data, transcript summaries, linked documents,
+/// and project-level docs. Returns `None` if there's no meaningful content to inject.
 pub fn build_context_prompt(
     issue: &Issue,
     summaries: &[String],
     documents: &[Document],
+    project_docs: &[(String, String)],
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -85,6 +122,31 @@ pub fn build_context_prompt(
         parts.push(section);
     }
 
+    // Project-level docs (from filesystem), deduped against DB docs
+    let db_basenames: Vec<String> = documents
+        .iter()
+        .filter_map(|d| {
+            d.file_path.as_ref().and_then(|fp| {
+                Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+        })
+        .collect();
+    let unique_project_docs: Vec<&(String, String)> = project_docs
+        .iter()
+        .filter(|(name, _)| !db_basenames.contains(name))
+        .collect();
+    if !unique_project_docs.is_empty() {
+        let mut section = String::from("## Project Documents");
+        for (name, content) in &unique_project_docs {
+            let text = truncate(content.trim(), PROJECT_DOC_CAP);
+            section.push_str(&format!("\n### {name}\n{text}"));
+        }
+        parts.push(section);
+    }
+
     // Nothing beyond the identifier/title? Skip injection.
     if parts.len() <= 1 && issue.description.as_ref().map_or(true, |d| d.trim().is_empty()) {
         return None;
@@ -126,6 +188,7 @@ mod tests {
             status_id: None,
             priority: 2,
             assignee: Some("Alice".into()),
+            assignee_id: None,
             team: Some("Engineering".into()),
             team_id: None,
             project: Some("Backend".into()),
@@ -140,7 +203,7 @@ mod tests {
     #[test]
     fn builds_prompt_with_description() {
         let issue = test_issue();
-        let result = build_context_prompt(&issue, &[], &[]);
+        let result = build_context_prompt(&issue, &[], &[], &[]);
         assert!(result.is_some());
         let prompt = result.unwrap();
         assert!(prompt.contains("ENG-42"));
@@ -153,7 +216,7 @@ mod tests {
     fn returns_none_for_empty_issue() {
         let mut issue = test_issue();
         issue.description = None;
-        let result = build_context_prompt(&issue, &[], &[]);
+        let result = build_context_prompt(&issue, &[], &[], &[]);
         assert!(result.is_none());
     }
 
@@ -169,8 +232,9 @@ mod tests {
             content: "Detailed spec content".into(),
             created_at: String::new(),
             updated_at: String::new(),
+            file_path: None,
         }];
-        let result = build_context_prompt(&issue, &summaries, &docs);
+        let result = build_context_prompt(&issue, &summaries, &docs, &[]);
         let prompt = result.unwrap();
         assert!(prompt.contains("Session 1"));
         assert!(prompt.contains("Summary of session 1"));

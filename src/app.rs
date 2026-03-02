@@ -8,11 +8,13 @@ use rusqlite::Connection;
 use tokio::sync::mpsc;
 
 use crate::action::{Action, DashboardStats};
+use crate::db::config_repo::AccountRow;
 use crate::tracker::types::{Label, Team, Project};
-use crate::claude::context::build_context_prompt;
+use crate::claude::context::{build_context_prompt, load_project_docs};
 use crate::claude::session::ClaudeManager;
 use crate::claude::transcript::TranscriptCaptureHandle;
 use crate::components::Component;
+use crate::components::account_picker::AccountPicker;
 use crate::components::command_palette::CommandPalette;
 use crate::components::dashboard::Dashboard;
 use crate::components::document_viewer::DocumentViewer;
@@ -66,6 +68,7 @@ pub struct App {
     dashboard: Dashboard,
     help_overlay: HelpOverlay,
     filter_picker: FilterPicker,
+    account_picker: AccountPicker,
     focus: FocusPanel,
     bottom_panel: BottomPanel,
     action_rx: mpsc::UnboundedReceiver<Action>,
@@ -75,6 +78,7 @@ pub struct App {
     tmux: Option<TmuxManager>,
     pane_size_index: usize,
     tracker: Option<Arc<dyn IssueTracker>>,
+    sync_handle: Option<tokio::task::JoinHandle<()>>,
     data_dir: PathBuf,
     transcript_capture: Option<TranscriptCaptureHandle>,
     teams: Vec<Team>,
@@ -148,6 +152,7 @@ impl App {
             dashboard: Dashboard::new(),
             help_overlay: HelpOverlay::new(),
             filter_picker: FilterPicker::new(),
+            account_picker: AccountPicker::new(),
             focus: FocusPanel::IssueList,
             bottom_panel: BottomPanel::Dashboard,
             action_rx,
@@ -157,6 +162,7 @@ impl App {
             tmux,
             pane_size_index: 1, // Start at 50%
             tracker: None,
+            sync_handle: None,
             data_dir,
             transcript_capture: None,
             teams: cached_teams,
@@ -166,10 +172,13 @@ impl App {
     }
 
     pub fn start_sync(&mut self, api_key: String) {
+        if let Some(handle) = self.sync_handle.take() {
+            handle.abort();
+        }
         let tracker: Arc<dyn IssueTracker> = Arc::new(LinearTracker::new(api_key));
         self.tracker = Some(tracker.clone());
         let sync = SyncManager::new(tracker, self.action_tx.clone());
-        sync.start_background_sync(Duration::from_secs(120));
+        self.sync_handle = Some(sync.start_background_sync(Duration::from_secs(120)));
     }
 
     pub async fn run(&mut self) -> color_eyre::Result<()> {
@@ -224,6 +233,9 @@ impl App {
         }
         if self.command_palette.is_visible() {
             return self.command_palette.handle_key_event(key);
+        }
+        if self.account_picker.is_visible() {
+            return self.account_picker.handle_key_event(key);
         }
         if self.settings.is_visible() {
             return self.settings.handle_key_event(key);
@@ -284,6 +296,26 @@ impl App {
         // 'n' for new issue
         if key.code == crossterm::event::KeyCode::Char('n') {
             return Some(Action::OpenNewIssue);
+        }
+
+        // 'a' for quick account switch
+        if key.code == crossterm::event::KeyCode::Char('a') {
+            let accounts = db::config_repo::list_accounts(&self.db_conn, &["linear"]).unwrap_or_default();
+            if accounts.len() > 1 {
+                let picker_accounts: Vec<crate::components::account_picker::Account> = accounts
+                    .into_iter()
+                    .map(|a| crate::components::account_picker::Account {
+                        id: a.id,
+                        name: a.name,
+                        provider: a.provider,
+                        is_active: a.is_active,
+                    })
+                    .collect();
+                self.account_picker.show(picker_accounts);
+            } else {
+                let _ = self.action_tx.send(Action::StatusMessage("Only one account configured".into()));
+            }
+            return None;
         }
 
         // Global filter keys
@@ -434,6 +466,108 @@ impl App {
                         .unwrap_or_default();
                 self.document_viewer.show(&issue_id, docs);
             }
+            Action::CreateDocument { issue_id, doc_type, title } => {
+                let issue = self.issue_list.find_issue(&issue_id).cloned();
+                let identifier = issue
+                    .as_ref()
+                    .map(|i| i.identifier.clone())
+                    .unwrap_or_else(|| issue_id.clone());
+                let working_dir = issue.as_ref().and_then(|i| self.resolve_working_dir(i));
+
+                let filename = db::document_repo::doc_filename(&identifier, &doc_type, &title);
+                let docs_dir = db::document_repo::resolve_docs_dir(
+                    working_dir.as_deref(),
+                    &self.data_dir,
+                    &issue_id,
+                );
+
+                // Write file to disk
+                let file_path = match db::document_repo::write_doc_file(
+                    &docs_dir,
+                    &filename,
+                    &title,
+                    &doc_type,
+                    "",
+                ) {
+                    Ok(p) => Some(p.to_string_lossy().to_string()),
+                    Err(e) => {
+                        tracing::error!("Failed to write doc file: {e}");
+                        None
+                    }
+                };
+
+                // Create in DB
+                match db::document_repo::create_document(
+                    &self.db_conn,
+                    &issue_id,
+                    &doc_type,
+                    &title,
+                    "",
+                    file_path.as_deref(),
+                ) {
+                    Ok(doc) => {
+                        // Index for FTS
+                        let _ = db::search_repo::index_content(
+                            &self.db_conn,
+                            "document",
+                            &doc.id,
+                            &issue_id,
+                            &title,
+                            &format!("{} {}", title, doc_type),
+                        );
+                        let _ = self.action_tx.send(Action::DocumentCreated(doc));
+                        let _ = self.action_tx.send(Action::StatusMessage(
+                            format!("Document created: {filename}")
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = self.action_tx.send(Action::Error(
+                            format!("Failed to create document: {e}")
+                        ));
+                    }
+                }
+            }
+            Action::SaveDocumentContent { doc_id, content } => {
+                match db::document_repo::get_document(&self.db_conn, &doc_id) {
+                    Ok(doc) => {
+                        if let Err(e) = db::document_repo::update_document(
+                            &self.db_conn,
+                            &doc_id,
+                            &doc.title,
+                            &content,
+                        ) {
+                            let _ = self.action_tx.send(Action::Error(
+                                format!("Failed to save document: {e}")
+                            ));
+                            return;
+                        }
+                        // Update file on disk if file_path is set
+                        if let Some(ref fp) = doc.file_path {
+                            if let Err(e) = std::fs::write(fp, &content) {
+                                tracing::warn!("Failed to update doc file {fp}: {e}");
+                            }
+                        }
+                        // Update FTS index
+                        let _ = db::search_repo::index_content(
+                            &self.db_conn,
+                            "document",
+                            &doc_id,
+                            &doc.issue_id,
+                            &doc.title,
+                            &content,
+                        );
+                        let _ = self.action_tx.send(Action::StatusMessage(
+                            "Document saved".into()
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = self.action_tx.send(Action::Error(
+                            format!("Failed to load document: {e}")
+                        ));
+                    }
+                }
+            }
+            Action::DocumentCreated(_) => {} // handled in document_viewer.update()
             Action::OpenSearch => self.search.show(None),
             Action::OpenCommandPalette => self.command_palette.show(),
             Action::OpenSettings => {
@@ -441,16 +575,12 @@ impl App {
                     .unwrap_or_default()
                     .into_values()
                     .collect();
-                let llm_provider = db::config_repo::get_config(&self.db_conn, "llm_provider")
-                    .ok()
-                    .flatten();
-                let llm_model = db::config_repo::get_config(&self.db_conn, "llm_model")
-                    .ok()
-                    .flatten();
-                let llm_api_key = db::config_repo::get_config(&self.db_conn, "llm_api_key")
-                    .ok()
-                    .flatten();
-                self.settings.set_llm_config(llm_provider, llm_model, llm_api_key);
+                let accounts = db::config_repo::list_accounts(
+                    &self.db_conn,
+                    &["linear", "claude", "openai", "ollama"],
+                )
+                .unwrap_or_default();
+                self.settings.set_accounts(accounts);
                 self.settings.show(hk);
             }
             Action::ShowHelp => {
@@ -501,6 +631,102 @@ impl App {
             Action::SetProjectFilter(project, team) => {
                 self.issue_list.set_project_filter(project, team);
             }
+            Action::SaveAccount { id, name, provider, api_key, model, ollama_url } => {
+                let result = if let Some(existing_id) = &id {
+                    db::config_repo::update_account(&self.db_conn, existing_id, &name, &api_key)
+                        .map(|_| existing_id.clone())
+                } else {
+                    db::config_repo::insert_account(&self.db_conn, &name, &provider, &api_key)
+                };
+                match result {
+                    Ok(account_id) => {
+                        // Save LLM extras if applicable
+                        if provider != "linear" {
+                            let _ = db::config_repo::set_account_llm_config(
+                                &self.db_conn,
+                                &account_id,
+                                model.as_deref(),
+                                ollama_url.as_deref(),
+                            );
+                        }
+                        // If this is the first account of its type, auto-activate it
+                        let group: &[&str] = if provider == "linear" {
+                            &["linear"]
+                        } else {
+                            &["claude", "openai", "ollama"]
+                        };
+                        let accounts = db::config_repo::list_accounts(&self.db_conn, group).unwrap_or_default();
+                        if accounts.len() == 1 || !accounts.iter().any(|a| a.is_active) {
+                            let _ = db::config_repo::set_active_account(&self.db_conn, &account_id, group);
+                        }
+                        let _ = self.action_tx.send(Action::StatusMessage(
+                            if id.is_some() { "Account updated".into() } else { "Account created".into() }
+                        ));
+                        let _ = self.action_tx.send(Action::LoadAccounts);
+                    }
+                    Err(e) => {
+                        let _ = self.action_tx.send(Action::Error(format!("Failed to save account: {e}")));
+                    }
+                }
+            }
+            Action::DeleteAccount(id) => {
+                if let Err(e) = db::config_repo::delete_account(&self.db_conn, &id) {
+                    let _ = self.action_tx.send(Action::Error(format!("Failed to delete account: {e}")));
+                } else {
+                    let _ = self.action_tx.send(Action::StatusMessage("Account deleted".into()));
+                    let _ = self.action_tx.send(Action::LoadAccounts);
+                }
+            }
+            Action::SwitchAccount(id) => {
+                match db::config_repo::get_account(&self.db_conn, &id) {
+                    Ok(Some(account)) => {
+                        let group: &[&str] = if account.provider == "linear" {
+                            &["linear"]
+                        } else {
+                            &["claude", "openai", "ollama"]
+                        };
+                        if let Err(e) = db::config_repo::set_active_account(&self.db_conn, &id, group) {
+                            let _ = self.action_tx.send(Action::Error(format!("Failed to switch account: {e}")));
+                        } else if account.provider == "linear" {
+                            // Restart sync with new key
+                            self.start_sync(account.api_key.clone());
+                            let _ = self.action_tx.send(Action::StatusMessage(
+                                format!("Switched to: {}", account.name)
+                            ));
+                        } else {
+                            // LLM switch: update global config keys
+                            let _ = db::config_repo::set_config(&self.db_conn, "llm_provider", &account.provider);
+                            let _ = db::config_repo::set_config(&self.db_conn, "llm_api_key", &account.api_key);
+                            let (model, ollama_url) = db::config_repo::get_account_llm_config(&self.db_conn, &id);
+                            if let Some(m) = &model {
+                                let _ = db::config_repo::set_config(&self.db_conn, "llm_model", m);
+                            }
+                            if let Some(u) = &ollama_url {
+                                let _ = db::config_repo::set_config(&self.db_conn, "llm_ollama_url", u);
+                            }
+                            let _ = self.action_tx.send(Action::StatusMessage(
+                                format!("LLM switched to: {} (restart to take effect)", account.name)
+                            ));
+                        }
+                        let _ = self.action_tx.send(Action::LoadAccounts);
+                    }
+                    Ok(None) => {
+                        let _ = self.action_tx.send(Action::Error("Account not found".into()));
+                    }
+                    Err(e) => {
+                        let _ = self.action_tx.send(Action::Error(format!("Failed to load account: {e}")));
+                    }
+                }
+            }
+            Action::LoadAccounts => {
+                let accounts = db::config_repo::list_accounts(
+                    &self.db_conn,
+                    &["linear", "claude", "openai", "ollama"],
+                )
+                .unwrap_or_default();
+                self.settings.set_accounts(accounts);
+            }
+            Action::AccountsLoaded(_) => {} // handled in settings.update()
             Action::Refresh => {
                 let _ = self
                     .action_tx
@@ -615,6 +841,44 @@ impl App {
         });
     }
 
+    /// Resolve working directory for an issue: project first, then team as fallback.
+    /// Each level checks by ID first (stable), then by name (ergonomic).
+    fn resolve_working_dir(&self, issue: &crate::tracker::types::Issue) -> Option<String> {
+        // Try project by ID first
+        if let Some(project_id) = &issue.project_id {
+            if let Ok(Some(dir)) =
+                db::config_repo::get_config(&self.db_conn, &format!("project_dir:{project_id}"))
+            {
+                return Some(dir);
+            }
+        }
+        // Then project by name
+        if let Some(project) = &issue.project {
+            if let Ok(Some(dir)) =
+                db::config_repo::get_config(&self.db_conn, &format!("project_dir:{project}"))
+            {
+                return Some(dir);
+            }
+        }
+        // Try team by ID first
+        if let Some(team_id) = &issue.team_id {
+            if let Ok(Some(dir)) =
+                db::config_repo::get_config(&self.db_conn, &format!("team_dir:{team_id}"))
+            {
+                return Some(dir);
+            }
+        }
+        // Then team by name
+        if let Some(team) = &issue.team {
+            if let Ok(Some(dir)) =
+                db::config_repo::get_config(&self.db_conn, &format!("team_dir:{team}"))
+            {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
     fn launch_claude(&mut self, issue_id: &str) {
         // Create Claude pane on demand if we're in tmux but haven't split yet
         if self.claude.is_none() {
@@ -649,8 +913,6 @@ impl App {
             }
         }
 
-        let claude = self.claude.as_mut().unwrap();
-
         let issue = self
             .issue_list
             .selected_issue()
@@ -662,43 +924,9 @@ impl App {
             .map(|i| i.identifier.clone())
             .unwrap_or_else(|| issue_id.to_string());
 
-        // Look up working directory: project first, then team as fallback.
-        // Each level checks by ID first (stable), then by name (ergonomic).
-        let working_dir = issue.as_ref().and_then(|i| {
-            // Try project by ID first
-            if let Some(project_id) = &i.project_id {
-                if let Ok(Some(dir)) =
-                    db::config_repo::get_config(&self.db_conn, &format!("project_dir:{project_id}"))
-                {
-                    return Some(dir);
-                }
-            }
-            // Then project by name
-            if let Some(project) = &i.project {
-                if let Ok(Some(dir)) =
-                    db::config_repo::get_config(&self.db_conn, &format!("project_dir:{project}"))
-                {
-                    return Some(dir);
-                }
-            }
-            // Try team by ID first
-            if let Some(team_id) = &i.team_id {
-                if let Ok(Some(dir)) =
-                    db::config_repo::get_config(&self.db_conn, &format!("team_dir:{team_id}"))
-                {
-                    return Some(dir);
-                }
-            }
-            // Then team by name
-            if let Some(team) = &i.team {
-                if let Ok(Some(dir)) =
-                    db::config_repo::get_config(&self.db_conn, &format!("team_dir:{team}"))
-                {
-                    return Some(dir);
-                }
-            }
-            None
-        });
+        let working_dir = issue.as_ref().and_then(|i| self.resolve_working_dir(i));
+
+        let claude = self.claude.as_mut().unwrap();
 
         // Check if this is a new session (not already active for same issue)
         let is_new_session = claude.active_issue_id() != Some(issue_id);
@@ -762,7 +990,14 @@ impl App {
         let documents =
             db::document_repo::list_documents_for_issue(&self.db_conn, issue_id).unwrap_or_default();
 
-        let Some(prompt) = build_context_prompt(&issue, &summaries, &documents) else {
+        // Load project-level docs from the working directory
+        let working_dir = self.resolve_working_dir(&issue);
+        let project_docs = working_dir
+            .as_ref()
+            .map(|dir| load_project_docs(std::path::Path::new(dir)))
+            .unwrap_or_default();
+
+        let Some(prompt) = build_context_prompt(&issue, &summaries, &documents, &project_docs) else {
             tracing::debug!("No context to inject for {}", issue.identifier);
             return;
         };
@@ -853,6 +1088,7 @@ impl App {
             self.filter_picker.render(frame, frame.area());
             self.search.render(frame, frame.area());
             self.settings.render(frame, frame.area());
+            self.account_picker.render(frame, frame.area());
             self.command_palette.render(frame, frame.area());
             self.help_overlay.render(frame, frame.area());
         })?;

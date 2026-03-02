@@ -30,6 +30,17 @@ impl Dropdown {
         self.items.get(self.selected).map(|s| s.as_str())
     }
 
+    pub fn set_items(&mut self, items: Vec<String>, selected: usize) {
+        self.items = items;
+        self.selected = selected.min(self.items.len().saturating_sub(1));
+        self.state.select(Some(self.selected));
+    }
+
+    pub fn set_selected(&mut self, idx: usize) {
+        self.selected = idx.min(self.items.len().saturating_sub(1));
+        self.state.select(Some(self.selected));
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }
