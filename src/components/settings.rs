@@ -1,12 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use crate::action::Action;
 use crate::config::hotkeys::HotkeyBinding;
+use crate::config::theme::{Theme, ThemeStyles};
 use crate::db::config_repo::AccountRow;
 use crate::widgets::dropdown::{Dropdown, DropdownAction};
 use crate::widgets::editable_field::{EditFieldAction, EditableField};
@@ -36,6 +37,7 @@ enum SettingsTab {
     Theme,
     Accounts,
     Llm,
+    Directories,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,25 @@ enum AccountFormField {
     Provider,
     Model,
     OllamaUrl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirMode {
+    List,
+    Add,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirMappingType {
+    Team,
+    Project,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirFormField {
+    Type,
+    Name,
+    Path,
 }
 
 pub struct Settings {
@@ -89,6 +110,19 @@ pub struct Settings {
     // Delete confirmation
     delete_target_id: Option<String>,
     delete_target_name: String,
+
+    // -- Directories tab --
+    dir_mappings: Vec<(String, String, String)>, // (type, name, path)
+    dir_list_state: ListState,
+    dir_mode: DirMode,
+    dir_mapping_type: DirMappingType, // team or project
+    dir_name_field: EditableField,
+    dir_path_field: EditableField,
+    dir_form_focus: DirFormField,
+    dir_known_teams: Vec<String>,
+    dir_known_projects: Vec<String>,
+    dir_name_picker_index: usize,
+    dir_picking_name: bool,
 }
 
 fn mask_api_key(key: &str) -> String {
@@ -115,6 +149,8 @@ impl Settings {
                 "light".into(),
                 "solarized".into(),
                 "gruvbox".into(),
+                "nord".into(),
+                "last-horizon".into(),
             ],
             theme_state: {
                 let mut s = ListState::default();
@@ -145,6 +181,18 @@ impl Settings {
 
             delete_target_id: None,
             delete_target_name: String::new(),
+
+            dir_mappings: Vec::new(),
+            dir_list_state: ListState::default(),
+            dir_mode: DirMode::List,
+            dir_mapping_type: DirMappingType::Team,
+            dir_name_field: EditableField::new("Name", "", false),
+            dir_path_field: EditableField::new("Path", "", false),
+            dir_form_focus: DirFormField::Type,
+            dir_known_teams: Vec::new(),
+            dir_known_projects: Vec::new(),
+            dir_name_picker_index: 0,
+            dir_picking_name: false,
         }
     }
 
@@ -160,6 +208,15 @@ impl Settings {
         self.visible = true;
         if !self.hotkeys.is_empty() {
             self.hotkey_state.select(Some(0));
+        }
+
+        // Add "custom" to theme list if a custom theme.conf exists
+        if !self.themes.contains(&"custom".to_string()) {
+            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "ctxrecall") {
+                if crate::config::theme::load_custom_theme(proj_dirs.config_dir()).is_some() {
+                    self.themes.push("custom".into());
+                }
+            }
         }
     }
 
@@ -191,6 +248,23 @@ impl Settings {
         self.llm_key_field.stop_editing();
         self.llm_model_custom_field.stop_editing();
         self.llm_ollama_url_field.stop_editing();
+        self.dir_name_field.stop_editing();
+        self.dir_path_field.stop_editing();
+    }
+
+    pub fn set_directory_mappings(&mut self, mappings: Vec<(String, String, String)>) {
+        self.dir_mappings = mappings;
+        if !self.dir_mappings.is_empty() {
+            let sel = self.dir_list_state.selected().unwrap_or(0).min(self.dir_mappings.len().saturating_sub(1));
+            self.dir_list_state.select(Some(sel));
+        } else {
+            self.dir_list_state.select(None);
+        }
+    }
+
+    pub fn set_known_teams_projects(&mut self, teams: Vec<String>, projects: Vec<String>) {
+        self.dir_known_teams = teams;
+        self.dir_known_projects = projects;
     }
 
     fn next_tab(&mut self) {
@@ -199,17 +273,19 @@ impl Settings {
             SettingsTab::Hotkeys => SettingsTab::Theme,
             SettingsTab::Theme => SettingsTab::Accounts,
             SettingsTab::Accounts => SettingsTab::Llm,
-            SettingsTab::Llm => SettingsTab::General,
+            SettingsTab::Llm => SettingsTab::Directories,
+            SettingsTab::Directories => SettingsTab::General,
         };
     }
 
     fn prev_tab(&mut self) {
         self.tab = match self.tab {
-            SettingsTab::General => SettingsTab::Llm,
+            SettingsTab::General => SettingsTab::Directories,
             SettingsTab::Hotkeys => SettingsTab::General,
             SettingsTab::Theme => SettingsTab::Hotkeys,
             SettingsTab::Accounts => SettingsTab::Theme,
             SettingsTab::Llm => SettingsTab::Accounts,
+            SettingsTab::Directories => SettingsTab::Llm,
         };
     }
 
@@ -220,6 +296,7 @@ impl Settings {
             SettingsTab::Theme => 2,
             SettingsTab::Accounts => 3,
             SettingsTab::Llm => 4,
+            SettingsTab::Directories => 5,
         }
     }
 
@@ -491,7 +568,7 @@ impl Settings {
                 _ => EditFieldAction::None,
             };
             return match result {
-                EditFieldAction::Submit | EditFieldAction::Cancel => None,
+                EditFieldAction::Submit | EditFieldAction::Cancel | EditFieldAction::OpenExternal => None,
                 EditFieldAction::None => None,
             };
         }
@@ -618,7 +695,7 @@ impl Settings {
         if self.llm_model_is_custom && self.llm_model_custom_field.is_editing() {
             let result = self.llm_model_custom_field.handle_key(key);
             return match result {
-                EditFieldAction::Submit | EditFieldAction::Cancel => None,
+                EditFieldAction::Submit | EditFieldAction::Cancel | EditFieldAction::OpenExternal => None,
                 EditFieldAction::None => None,
             };
         }
@@ -632,7 +709,7 @@ impl Settings {
                 _ => EditFieldAction::None,
             };
             return match result {
-                EditFieldAction::Submit | EditFieldAction::Cancel => None,
+                EditFieldAction::Submit | EditFieldAction::Cancel | EditFieldAction::OpenExternal => None,
                 EditFieldAction::None => None,
             };
         }
@@ -706,18 +783,18 @@ impl Settings {
 
     // --- Rendering ---
 
-    fn render_accounts_tab(&self, frame: &mut Frame, area: Rect) {
+    fn render_accounts_tab(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         match self.accounts_mode {
-            AccountsMode::List => self.render_accounts_list(frame, area),
-            AccountsMode::Add | AccountsMode::Edit => self.render_accounts_form(frame, area),
+            AccountsMode::List => self.render_accounts_list(frame, area, s),
+            AccountsMode::Add | AccountsMode::Edit => self.render_accounts_form(frame, area, s),
             AccountsMode::Confirm => {
-                self.render_accounts_list(frame, area);
-                self.render_confirm_dialog(frame, area);
+                self.render_accounts_list(frame, area, s);
+                self.render_confirm_dialog(frame, area, s);
             }
         }
     }
 
-    fn render_accounts_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_accounts_list(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Length(2), // header
             Constraint::Min(1),   // list
@@ -728,7 +805,7 @@ impl Settings {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  Linear Accounts",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(s.accent).add_modifier(Modifier::BOLD),
             ))),
             chunks[0],
         );
@@ -749,14 +826,14 @@ impl Settings {
                 .map(|a| {
                     let active = if a.is_active { " * " } else { "   " };
                     ListItem::new(Line::from(vec![
-                        Span::styled(active, Style::default().fg(Color::Green)),
+                        Span::styled(active, Style::default().fg(s.success)),
                         Span::styled(
                             format!("{:<20}", a.name),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(s.fg),
                         ),
                         Span::styled(
                             mask_api_key(&a.api_key),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(s.muted),
                         ),
                     ]))
                 })
@@ -765,7 +842,7 @@ impl Settings {
             let list = List::new(items)
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(s.selection)
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("▶ ");
@@ -776,13 +853,13 @@ impl Settings {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " a: add | e: edit | d: delete | Enter: switch | Tab: next section",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[2],
         );
     }
 
-    fn render_accounts_form(&self, frame: &mut Frame, area: Rect) {
+    fn render_accounts_form(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let title = if self.accounts_mode == AccountsMode::Add {
             "Add Linear Account"
         } else {
@@ -792,8 +869,8 @@ impl Settings {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
+            .border_style(Style::default().fg(s.accent))
+            .style(Style::default().bg(s.bg));
 
         let form_width = 50u16.min(area.width.saturating_sub(4));
         let form_height = 8u16.min(area.height.saturating_sub(4));
@@ -820,31 +897,31 @@ impl Settings {
         .split(inner);
 
         self.render_form_field(frame, field_chunks[0], "Name", self.account_name_field.value(),
-            self.account_form_focus == AccountFormField::Name, self.account_name_field.is_editing());
+            self.account_form_focus == AccountFormField::Name, self.account_name_field.is_editing(), s);
         self.render_form_field(frame, field_chunks[1], "API Key", self.account_key_field.value(),
-            self.account_form_focus == AccountFormField::ApiKey, self.account_key_field.is_editing());
+            self.account_form_focus == AccountFormField::ApiKey, self.account_key_field.is_editing(), s);
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "j/k: navigate | Enter: edit | s: save | Esc: cancel",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             field_chunks[3],
         );
     }
 
-    fn render_llm_tab(&self, frame: &mut Frame, area: Rect) {
+    fn render_llm_tab(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         match self.llm_mode {
-            AccountsMode::List => self.render_llm_list(frame, area),
-            AccountsMode::Add | AccountsMode::Edit => self.render_llm_form(frame, area),
+            AccountsMode::List => self.render_llm_list(frame, area, s),
+            AccountsMode::Add | AccountsMode::Edit => self.render_llm_form(frame, area, s),
             AccountsMode::Confirm => {
-                self.render_llm_list(frame, area);
-                self.render_confirm_dialog(frame, area);
+                self.render_llm_list(frame, area, s);
+                self.render_confirm_dialog(frame, area, s);
             }
         }
     }
 
-    fn render_llm_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_llm_list(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Length(3), // header
             Constraint::Min(1),   // list
@@ -856,11 +933,11 @@ impl Settings {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     "  LLM Configuration",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default().fg(s.accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     "  Used for transcript summarization.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(s.muted),
                 )),
             ]),
             chunks[0],
@@ -887,16 +964,16 @@ impl Settings {
                         mask_api_key(&a.api_key)
                     };
                     ListItem::new(Line::from(vec![
-                        Span::styled(active, Style::default().fg(Color::Green)),
+                        Span::styled(active, Style::default().fg(s.success)),
                         Span::styled(
                             format!("{:<8}", a.provider),
-                            Style::default().fg(Color::Yellow),
+                            Style::default().fg(s.warning),
                         ),
                         Span::styled(
                             format!("{:<16}", a.name),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(s.fg),
                         ),
-                        Span::styled(key_display, Style::default().fg(Color::DarkGray)),
+                        Span::styled(key_display, Style::default().fg(s.muted)),
                     ]))
                 })
                 .collect();
@@ -904,7 +981,7 @@ impl Settings {
             let list = List::new(items)
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(s.selection)
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("▶ ");
@@ -915,13 +992,13 @@ impl Settings {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " a: add | e: edit | d: delete | Enter: switch | Tab: next section",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[2],
         );
     }
 
-    fn render_llm_form(&self, frame: &mut Frame, area: Rect) {
+    fn render_llm_form(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let title = if self.llm_mode == AccountsMode::Add {
             "Add LLM Config"
         } else {
@@ -936,8 +1013,8 @@ impl Settings {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
+            .border_style(Style::default().fg(s.accent))
+            .style(Style::default().bg(s.bg));
 
         let form_width = 55u16.min(area.width.saturating_sub(4));
         let fh = form_height.min(area.height.saturating_sub(4));
@@ -973,28 +1050,28 @@ impl Settings {
         let field_chunks = Layout::vertical(constraints).split(inner);
 
         self.render_form_field(frame, field_chunks[0], "Name", self.llm_name_field.value(),
-            self.llm_form_focus == AccountFormField::Name, self.llm_name_field.is_editing());
+            self.llm_form_focus == AccountFormField::Name, self.llm_name_field.is_editing(), s);
 
         // Provider field (cycle on Enter)
         let provider_focused = self.llm_form_focus == AccountFormField::Provider;
         let provider_style = if provider_focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(s.fg)
         };
         let arrow = if provider_focused { "▶ " } else { "  " };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(arrow),
-                Span::styled("Provider: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Provider: ", Style::default().fg(s.accent).add_modifier(Modifier::BOLD)),
                 Span::styled(self.current_llm_provider(), provider_style),
-                Span::styled(" (Enter to cycle)", Style::default().fg(Color::DarkGray)),
+                Span::styled(" (Enter to cycle)", Style::default().fg(s.muted)),
             ])),
             field_chunks[1],
         );
 
         self.render_form_field(frame, field_chunks[2], "API Key", self.llm_key_field.value(),
-            self.llm_form_focus == AccountFormField::ApiKey, self.llm_key_field.is_editing());
+            self.llm_form_focus == AccountFormField::ApiKey, self.llm_key_field.is_editing(), s);
 
         // Model dropdown row
         let model_focused = self.llm_form_focus == AccountFormField::Model;
@@ -1024,14 +1101,14 @@ impl Settings {
 
         if is_ollama {
             self.render_form_field(frame, field_chunks[next_field_idx], "Ollama URL", self.llm_ollama_url_field.value(),
-                self.llm_form_focus == AccountFormField::OllamaUrl, self.llm_ollama_url_field.is_editing());
+                self.llm_form_focus == AccountFormField::OllamaUrl, self.llm_ollama_url_field.is_editing(), s);
         }
 
         let help_idx = field_chunks.len() - 1;
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "j/k: navigate | Enter: edit/cycle | s: save | Esc: cancel",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             field_chunks[help_idx],
         );
@@ -1048,12 +1125,12 @@ impl Settings {
         }
     }
 
-    fn render_form_field(&self, frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, editing: bool) {
+    fn render_form_field(&self, frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, editing: bool, s: &ThemeStyles) {
         let arrow = if focused { "▶ " } else { "  " };
         let val_style = if editing {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(s.fg).bg(s.selection)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(s.fg)
         };
         let display_val = if value.is_empty() && !editing {
             "(empty)".to_string()
@@ -1063,19 +1140,19 @@ impl Settings {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(arrow),
-                Span::styled(format!("{label}: "), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{label}: "), Style::default().fg(s.accent).add_modifier(Modifier::BOLD)),
                 Span::styled(display_val, val_style),
             ])),
             area,
         );
     }
 
-    fn render_confirm_dialog(&self, frame: &mut Frame, area: Rect) {
+    fn render_confirm_dialog(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let block = Block::default()
             .title("Confirm Delete")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
-            .style(Style::default().bg(Color::Black));
+            .border_style(Style::default().fg(s.error))
+            .style(Style::default().bg(s.bg));
 
         let w = 40u16.min(area.width.saturating_sub(4));
         let h = 6u16.min(area.height.saturating_sub(4));
@@ -1090,12 +1167,425 @@ impl Settings {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(format!(" Delete \"{}\"?", self.delete_target_name)),
-                Line::from(Span::styled(" This cannot be undone.", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(" This cannot be undone.", Style::default().fg(s.muted))),
                 Line::from(""),
-                Line::from(Span::styled(" y: confirm | Esc: cancel", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(" y: confirm | Esc: cancel", Style::default().fg(s.muted))),
             ]).wrap(Wrap { trim: false }),
             inner,
         );
+    }
+    // --- Directory mapping helpers ---
+
+    fn dir_name_choices(&self) -> &[String] {
+        match self.dir_mapping_type {
+            DirMappingType::Team => &self.dir_known_teams,
+            DirMappingType::Project => &self.dir_known_projects,
+        }
+    }
+
+    fn handle_directories_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // If picking a name from the list
+        if self.dir_picking_name {
+            let choices = self.dir_name_choices().to_vec();
+            if choices.is_empty() {
+                self.dir_picking_name = false;
+                self.dir_name_field.start_editing();
+                return None;
+            }
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if self.dir_name_picker_index < choices.len().saturating_sub(1) {
+                        self.dir_name_picker_index += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.dir_name_picker_index = self.dir_name_picker_index.saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    if let Some(name) = choices.get(self.dir_name_picker_index) {
+                        self.dir_name_field.set_value(name);
+                    }
+                    self.dir_picking_name = false;
+                    self.dir_form_focus = DirFormField::Path;
+                    self.dir_path_field.start_editing();
+                }
+                KeyCode::Esc => {
+                    self.dir_picking_name = false;
+                    self.dir_mode = DirMode::List;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        // If editing a field
+        if self.dir_name_field.is_editing() {
+            let result = self.dir_name_field.handle_key(key);
+            return match result {
+                EditFieldAction::Submit => {
+                    self.dir_form_focus = DirFormField::Path;
+                    self.dir_path_field.start_editing();
+                    None
+                }
+                EditFieldAction::Cancel => {
+                    self.dir_mode = DirMode::List;
+                    None
+                }
+                EditFieldAction::OpenExternal | EditFieldAction::None => None,
+            };
+        }
+        if self.dir_path_field.is_editing() {
+            let result = self.dir_path_field.handle_key(key);
+            return match result {
+                EditFieldAction::Submit => {
+                    // Save the mapping
+                    let mapping_type = match self.dir_mapping_type {
+                        DirMappingType::Team => "team",
+                        DirMappingType::Project => "project",
+                    };
+                    let name = self.dir_name_field.value().trim().to_string();
+                    let path = self.dir_path_field.value().trim().to_string();
+                    if name.is_empty() || path.is_empty() {
+                        return Some(Action::Error("Name and path are required".into()));
+                    }
+                    self.dir_mode = DirMode::List;
+                    Some(Action::SaveDirectoryMapping {
+                        mapping_type: mapping_type.into(),
+                        name,
+                        path,
+                    })
+                }
+                EditFieldAction::Cancel => {
+                    self.dir_mode = DirMode::List;
+                    None
+                }
+                EditFieldAction::OpenExternal | EditFieldAction::None => None,
+            };
+        }
+
+        match self.dir_mode {
+            DirMode::Add => {
+                // Form navigation (not editing)
+                match key.code {
+                    KeyCode::Esc => {
+                        self.dir_mode = DirMode::List;
+                    }
+                    KeyCode::Tab | KeyCode::Char('j') | KeyCode::Down => {
+                        self.dir_form_focus = match self.dir_form_focus {
+                            DirFormField::Type => DirFormField::Name,
+                            DirFormField::Name => DirFormField::Path,
+                            DirFormField::Path => DirFormField::Type,
+                        };
+                    }
+                    KeyCode::BackTab | KeyCode::Char('k') | KeyCode::Up => {
+                        self.dir_form_focus = match self.dir_form_focus {
+                            DirFormField::Type => DirFormField::Path,
+                            DirFormField::Name => DirFormField::Type,
+                            DirFormField::Path => DirFormField::Name,
+                        };
+                    }
+                    KeyCode::Enter => {
+                        match self.dir_form_focus {
+                            DirFormField::Type => {
+                                self.dir_mapping_type = match self.dir_mapping_type {
+                                    DirMappingType::Team => DirMappingType::Project,
+                                    DirMappingType::Project => DirMappingType::Team,
+                                };
+                            }
+                            DirFormField::Name => {
+                                let choices = self.dir_name_choices().to_vec();
+                                if choices.is_empty() {
+                                    self.dir_name_field.start_editing();
+                                } else {
+                                    self.dir_picking_name = true;
+                                    self.dir_name_picker_index = 0;
+                                }
+                            }
+                            DirFormField::Path => {
+                                // Default to current directory
+                                if self.dir_path_field.value().is_empty() {
+                                    if let Ok(cwd) = std::env::current_dir() {
+                                        self.dir_path_field.set_value(&cwd.display().to_string());
+                                    }
+                                }
+                                self.dir_path_field.start_editing();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }
+            DirMode::List => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.hide();
+                        None
+                    }
+                    KeyCode::Tab => {
+                        self.next_tab();
+                        None
+                    }
+                    KeyCode::BackTab => {
+                        self.prev_tab();
+                        None
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let i = self.dir_list_state.selected().unwrap_or(0);
+                        if i < self.dir_mappings.len().saturating_sub(1) {
+                            self.dir_list_state.select(Some(i + 1));
+                        }
+                        None
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let i = self.dir_list_state.selected().unwrap_or(0);
+                        if i > 0 {
+                            self.dir_list_state.select(Some(i - 1));
+                        }
+                        None
+                    }
+                    KeyCode::Char('n') => {
+                        self.dir_mode = DirMode::Add;
+                        self.dir_mapping_type = DirMappingType::Team;
+                        self.dir_name_field.set_value("");
+                        if let Ok(cwd) = std::env::current_dir() {
+                            self.dir_path_field.set_value(&cwd.display().to_string());
+                        } else {
+                            self.dir_path_field.set_value("");
+                        }
+                        self.dir_form_focus = DirFormField::Type;
+                        self.dir_picking_name = false;
+                        None
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(idx) = self.dir_list_state.selected() {
+                            if let Some((typ, name, _)) = self.dir_mappings.get(idx) {
+                                let key = format!("{typ}_dir:{name}");
+                                return Some(Action::DeleteDirectoryMapping { key });
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    fn render_directories_tab(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
+        match self.dir_mode {
+            DirMode::List => {
+                let chunks = Layout::vertical([
+                    Constraint::Min(1),   // List
+                    Constraint::Length(1), // Help
+                ])
+                .split(area);
+
+                if self.dir_mappings.is_empty() {
+                    frame.render_widget(
+                        Paragraph::new(vec![
+                            Line::from(""),
+                            Line::from(Span::styled(
+                                "  No directory mappings configured.",
+                                Style::default().fg(s.muted),
+                            )),
+                            Line::from(""),
+                            Line::from(Span::styled(
+                                "  Press 'n' to add a mapping.",
+                                Style::default().fg(s.muted),
+                            )),
+                            Line::from(""),
+                            Line::from(Span::styled(
+                                "  Mappings auto-filter issues when you launch from a mapped directory.",
+                                Style::default().fg(s.muted),
+                            )),
+                        ]),
+                        chunks[0],
+                    );
+                } else {
+                    let items: Vec<ListItem> = self
+                        .dir_mappings
+                        .iter()
+                        .map(|(typ, name, path)| {
+                            let type_label = if typ == "team" { "Team" } else { "Project" };
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("{type_label:<8}"),
+                                    Style::default().fg(s.accent),
+                                ),
+                                Span::styled(
+                                    format!("{name:<20}"),
+                                    Style::default().fg(s.warning),
+                                ),
+                                Span::styled(" → ", Style::default().fg(s.muted)),
+                                Span::raw(path.as_str()),
+                            ]))
+                        })
+                        .collect();
+
+                    let list = List::new(items)
+                        .highlight_style(
+                            Style::default()
+                                .bg(s.selection)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("▶ ");
+
+                    frame.render_stateful_widget(list, chunks[0], &mut self.dir_list_state.clone());
+                }
+
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " n: add | d: delete | Tab: sections | Esc: close",
+                        Style::default().fg(s.muted),
+                    ))),
+                    chunks[1],
+                );
+            }
+            DirMode::Add => {
+                let chunks = Layout::vertical([
+                    Constraint::Length(1), // Header
+                    Constraint::Length(1), // Spacer
+                    Constraint::Length(1), // Type
+                    Constraint::Length(1), // Name
+                    Constraint::Length(1), // Path
+                    Constraint::Length(1), // Spacer
+                    Constraint::Min(1),   // Name picker or empty
+                    Constraint::Length(1), // Help
+                ])
+                .split(area);
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  Add Directory Mapping",
+                        Style::default().fg(s.accent).add_modifier(Modifier::BOLD),
+                    )),
+                    chunks[0],
+                );
+
+                // Type field
+                let type_focused = matches!(self.dir_form_focus, DirFormField::Type);
+                let type_label = match self.dir_mapping_type {
+                    DirMappingType::Team => "Team",
+                    DirMappingType::Project => "Project",
+                };
+                let marker = if type_focused { "▶ " } else { "  " };
+                let style = if type_focused {
+                    Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(marker),
+                        Span::styled("Type: ", Style::default().fg(s.accent)),
+                        Span::styled(type_label, style),
+                        Span::styled(" (Enter to toggle)", Style::default().fg(s.muted)),
+                    ])),
+                    chunks[2],
+                );
+
+                // Name field
+                let name_focused = matches!(self.dir_form_focus, DirFormField::Name);
+                let name_editing = self.dir_name_field.is_editing();
+                let marker = if name_focused { "▶ " } else { "  " };
+                let name_display = if name_editing {
+                    format!("{}│", self.dir_name_field.value())
+                } else if self.dir_name_field.value().is_empty() {
+                    "(select or type)".into()
+                } else {
+                    self.dir_name_field.value().to_string()
+                };
+                let name_style = if name_editing {
+                    Style::default().fg(s.fg).bg(s.selection)
+                } else if name_focused {
+                    Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(marker),
+                        Span::styled("Name: ", Style::default().fg(s.accent)),
+                        Span::styled(name_display, name_style),
+                    ])),
+                    chunks[3],
+                );
+
+                // Path field
+                let path_focused = matches!(self.dir_form_focus, DirFormField::Path);
+                let path_editing = self.dir_path_field.is_editing();
+                let marker = if path_focused { "▶ " } else { "  " };
+                let path_display = if path_editing {
+                    format!("{}│", self.dir_path_field.value())
+                } else if self.dir_path_field.value().is_empty() {
+                    "(current directory)".into()
+                } else {
+                    self.dir_path_field.value().to_string()
+                };
+                let path_style = if path_editing {
+                    Style::default().fg(s.fg).bg(s.selection)
+                } else if path_focused {
+                    Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(marker),
+                        Span::styled("Path: ", Style::default().fg(s.accent)),
+                        Span::styled(path_display, path_style),
+                    ])),
+                    chunks[4],
+                );
+
+                // Name picker list (if active)
+                if self.dir_picking_name {
+                    let choices = self.dir_name_choices();
+                    let items: Vec<ListItem> = choices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| {
+                            let style = if i == self.dir_name_picker_index {
+                                Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            };
+                            let marker = if i == self.dir_name_picker_index { "▶ " } else { "  " };
+                            ListItem::new(Line::from(vec![
+                                Span::raw(marker),
+                                Span::styled(name.as_str(), style),
+                            ]))
+                        })
+                        .collect();
+                    frame.render_widget(
+                        List::new(items).block(
+                            Block::default()
+                                .title(" Select name ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(s.warning)),
+                        ),
+                        chunks[6],
+                    );
+                }
+
+                // Help
+                let help = if self.dir_picking_name {
+                    " j/k: navigate | Enter: select | Esc: cancel"
+                } else if name_editing || path_editing {
+                    " Type to edit | Enter: confirm | Esc: cancel"
+                } else {
+                    " Tab/j/k: fields | Enter: edit/toggle | Esc: cancel"
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        help,
+                        Style::default().fg(s.muted),
+                    ))),
+                    chunks[7],
+                );
+            }
+        }
     }
 }
 
@@ -1108,6 +1598,7 @@ impl Component for Settings {
         match self.tab {
             SettingsTab::Accounts => return self.handle_accounts_key(key),
             SettingsTab::Llm => return self.handle_llm_key(key),
+            SettingsTab::Directories => return self.handle_directories_key(key),
             _ => {}
         }
 
@@ -1123,6 +1614,16 @@ impl Component for Settings {
             }
             KeyCode::BackTab => {
                 self.prev_tab();
+                None
+            }
+            KeyCode::Enter => {
+                if self.tab == SettingsTab::Theme {
+                    if let Some(idx) = self.theme_state.selected() {
+                        if let Some(name) = self.themes.get(idx) {
+                            return Some(Action::SetTheme(name.clone()));
+                        }
+                    }
+                }
                 None
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1166,18 +1667,25 @@ impl Component for Settings {
     }
 
     fn update(&mut self, action: &Action) -> Option<Action> {
-        if let Action::AccountsLoaded(accounts) = action {
-            self.set_accounts(accounts.clone());
+        match action {
+            Action::AccountsLoaded(accounts) => {
+                self.set_accounts(accounts.clone());
+            }
+            Action::DirectoryMappingsLoaded(mappings) => {
+                self.set_directory_mappings(mappings.clone());
+            }
+            _ => {}
         }
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
+        let s = theme.styles();
 
-        let inner = modal::render_modal(frame, area, "Settings", 70, 70);
+        let inner = modal::render_modal_themed(frame, area, "Settings", 70, 70, Some(&s));
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Tabs
@@ -1188,12 +1696,12 @@ impl Component for Settings {
         .split(inner);
 
         // Tab bar
-        let tabs = Tabs::new(vec!["General", "Hotkeys", "Theme", "Accounts", "LLM"])
+        let tabs = Tabs::new(vec!["General", "Hotkeys", "Theme", "Accounts", "LLM", "Dirs"])
             .select(self.tab_index())
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(s.muted))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(s.warning)
                     .add_modifier(Modifier::BOLD),
             );
         frame.render_widget(tabs, chunks[0]);
@@ -1206,7 +1714,7 @@ impl Component for Settings {
                         Line::from(Span::styled(
                             "  General Settings",
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(s.accent)
                                 .add_modifier(Modifier::BOLD),
                         )),
                         Line::from(""),
@@ -1225,15 +1733,15 @@ impl Component for Settings {
                         ListItem::new(Line::from(vec![
                             Span::styled(
                                 format!("{:<20}", h.action),
-                                Style::default().fg(Color::Cyan),
+                                Style::default().fg(s.accent),
                             ),
                             Span::styled(
                                 format!("{:<10}", h.key_binding),
-                                Style::default().fg(Color::Yellow),
+                                Style::default().fg(s.warning),
                             ),
                             Span::styled(
                                 h.description.as_deref().unwrap_or(""),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(s.muted),
                             ),
                         ]))
                     })
@@ -1242,7 +1750,7 @@ impl Component for Settings {
                 let list = List::new(items)
                     .highlight_style(
                         Style::default()
-                            .bg(Color::DarkGray)
+                            .bg(s.selection)
                             .add_modifier(Modifier::BOLD),
                     )
                     .highlight_symbol("▶ ");
@@ -1263,7 +1771,7 @@ impl Component for Settings {
                 let list = List::new(items)
                     .highlight_style(
                         Style::default()
-                            .bg(Color::DarkGray)
+                            .bg(s.selection)
                             .add_modifier(Modifier::BOLD),
                     )
                     .highlight_symbol("▶ ");
@@ -1275,20 +1783,32 @@ impl Component for Settings {
                 );
             }
             SettingsTab::Accounts => {
-                self.render_accounts_tab(frame, chunks[2]);
+                self.render_accounts_tab(frame, chunks[2], &s);
             }
             SettingsTab::Llm => {
-                self.render_llm_tab(frame, chunks[2]);
+                self.render_llm_tab(frame, chunks[2], &s);
+            }
+            SettingsTab::Directories => {
+                self.render_directories_tab(frame, chunks[2], &s);
             }
         }
 
         // Help (only for non-interactive tabs; interactive tabs have their own)
         match self.tab {
-            SettingsTab::General | SettingsTab::Hotkeys | SettingsTab::Theme => {
+            SettingsTab::General | SettingsTab::Hotkeys => {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         " Tab/S-Tab: sections | j/k: navigate | Esc: close",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(s.muted),
+                    ))),
+                    chunks[3],
+                );
+            }
+            SettingsTab::Theme => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " Tab/S-Tab: sections | j/k: navigate | Enter: apply | Esc: close",
+                        Style::default().fg(s.muted),
                     ))),
                     chunks[3],
                 );

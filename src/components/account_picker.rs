@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 use crate::widgets::modal;
 
 use super::Component;
@@ -93,12 +94,13 @@ impl Component for AccountPicker {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
-        let inner = modal::render_modal(frame, area, "Switch Account", 40, 30);
+        let s = theme.styles();
+        let inner = modal::render_modal_themed(frame, area, "Switch Account", 40, 30, Some(&s));
 
         if self.accounts.is_empty() {
             return;
@@ -110,11 +112,11 @@ impl Component for AccountPicker {
             .map(|a| {
                 let active = if a.is_active { " *" } else { "  " };
                 ListItem::new(Line::from(vec![
-                    Span::styled(active, Style::default().fg(Color::Green)),
+                    Span::styled(active, Style::default().fg(s.success)),
                     Span::raw(format!(" {} ", a.name)),
                     Span::styled(
                         format!("({})", a.provider),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(s.muted),
                     ),
                 ]))
             })
@@ -123,7 +125,7 @@ impl Component for AccountPicker {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");

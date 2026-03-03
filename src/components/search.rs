@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use crate::config::theme::Theme;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
@@ -78,10 +79,11 @@ impl Component for SearchOverlay {
             KeyCode::Enter => {
                 let action = if let Some(i) = self.state.selected() {
                     self.results.get(i).map(|result| {
-                        Action::StatusMessage(format!(
-                            "Selected: {} ({})",
-                            result.title, result.source_type
-                        ))
+                        Action::SearchSelect {
+                            source_type: result.source_type.clone(),
+                            source_id: result.source_id.clone(),
+                            issue_id: result.issue_id.clone(),
+                        }
                     })
                 } else {
                     None
@@ -137,12 +139,13 @@ impl Component for SearchOverlay {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
-        let inner = modal::render_modal(frame, area, "Search", 60, 50);
+        let s = theme.styles();
+        let inner = modal::render_modal_themed(frame, area, "Search", 60, 50, Some(&s));
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Input
@@ -158,13 +161,13 @@ impl Component for SearchOverlay {
             self.query.clone()
         };
         let input_style = if self.query.is_empty() {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(s.muted)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(s.fg)
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" / ", Style::default().fg(Color::Yellow)),
+                Span::styled(" / ", Style::default().fg(s.warning)),
                 Span::styled(display_query, input_style),
             ])),
             chunks[0],
@@ -175,7 +178,7 @@ impl Component for SearchOverlay {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "  No results",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(s.muted),
                 ))),
                 chunks[2],
             );
@@ -185,11 +188,11 @@ impl Component for SearchOverlay {
                 .iter()
                 .map(|r| {
                     let type_color = match r.source_type.as_str() {
-                        "issue" => Color::Cyan,
-                        "document" => Color::Green,
-                        "transcript" => Color::Yellow,
-                        "summary" => Color::Magenta,
-                        _ => Color::White,
+                        "issue" => s.accent,
+                        "document" => s.success,
+                        "transcript" => s.warning,
+                        "summary" => s.accent,
+                        _ => s.fg,
                     };
 
                     ListItem::new(Line::from(vec![
@@ -205,7 +208,7 @@ impl Component for SearchOverlay {
             let list = List::new(items)
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(s.selection)
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("▶ ");

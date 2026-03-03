@@ -5,6 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::config::theme::ThemeStyles;
+
 pub struct EditableField {
     label: String,
     value: String,
@@ -61,7 +63,7 @@ impl EditableField {
                 EditFieldAction::Cancel
             }
             KeyCode::Enter => {
-                if self.multiline && key.modifiers.contains(KeyModifiers::SHIFT) {
+                if self.multiline {
                     self.insert_char('\n');
                     EditFieldAction::None
                 } else {
@@ -106,6 +108,9 @@ impl EditableField {
                 self.cursor = self.value.chars().count();
                 EditFieldAction::None
             }
+            KeyCode::Char('v') if self.multiline && key.modifiers.contains(KeyModifiers::CONTROL) => {
+                EditFieldAction::OpenExternal
+            }
             KeyCode::Char(c) => {
                 self.insert_char(c);
                 EditFieldAction::None
@@ -129,11 +134,19 @@ impl EditableField {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let label_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        self.render_themed(frame, area, None);
+    }
+
+    pub fn render_themed(&self, frame: &mut Frame, area: Rect, styles: Option<&ThemeStyles>) {
+        let accent = styles.map_or(Color::Cyan, |s| s.accent);
+        let fg = styles.map_or(Color::White, |s| s.fg);
+        let selection = styles.map_or(Color::DarkGray, |s| s.selection);
+
+        let label_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
         let value_style = if self.editing {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(fg).bg(selection)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(fg)
         };
 
         let display_val = if self.value.is_empty() && !self.editing {
@@ -167,4 +180,5 @@ pub enum EditFieldAction {
     None,
     Submit,
     Cancel,
+    OpenExternal,
 }

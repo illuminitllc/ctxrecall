@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::action::Action;
+use crate::config::theme::{Theme, ThemeStyles};
 use crate::db::document_repo::Document;
 use crate::widgets::editable_field::{EditFieldAction, EditableField};
 use crate::widgets::modal;
@@ -198,7 +199,7 @@ impl DocumentViewer {
                             self.is_custom_type = false;
                             self.doc_type_index = 0;
                         }
-                        EditFieldAction::None => {}
+                        EditFieldAction::OpenExternal | EditFieldAction::None => {}
                     }
                     return None;
                 }
@@ -263,7 +264,7 @@ impl DocumentViewer {
                         EditFieldAction::Cancel => {
                             self.create_phase = CreatePhase::SelectType;
                         }
-                        EditFieldAction::None => {}
+                        EditFieldAction::OpenExternal | EditFieldAction::None => {}
                     }
                     None
                 } else {
@@ -304,7 +305,7 @@ impl DocumentViewer {
                     }
                     self.mode = Mode::View;
                 }
-                EditFieldAction::None => {}
+                EditFieldAction::OpenExternal | EditFieldAction::None => {}
             }
             return None;
         }
@@ -321,7 +322,7 @@ impl DocumentViewer {
         None
     }
 
-    fn render_list(&self, frame: &mut Frame, inner: Rect) {
+    fn render_list(&self, frame: &mut Frame, inner: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1),
@@ -332,7 +333,7 @@ impl DocumentViewer {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "  No documents. Press 'n' to create one.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(s.muted),
                 ))),
                 chunks[0],
             );
@@ -342,12 +343,12 @@ impl DocumentViewer {
                 .iter()
                 .map(|d| {
                     let type_color = match d.doc_type.as_str() {
-                        "plan" => Color::Cyan,
-                        "prd" => Color::Green,
-                        "tasks" => Color::Yellow,
-                        "memories" => Color::Magenta,
-                        "notes" => Color::White,
-                        _ => Color::LightBlue,
+                        "plan" => s.accent,
+                        "prd" => s.success,
+                        "tasks" => s.warning,
+                        "memories" => s.accent,
+                        "notes" => s.fg,
+                        _ => s.accent,
                     };
 
                     ListItem::new(Line::from(vec![
@@ -358,7 +359,7 @@ impl DocumentViewer {
                         Span::raw(&d.title),
                         Span::styled(
                             format!("  ({})", d.updated_at),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(s.muted),
                         ),
                     ]))
                 })
@@ -367,7 +368,7 @@ impl DocumentViewer {
             let list = List::new(items)
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(s.selection)
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("▶ ");
@@ -378,13 +379,13 @@ impl DocumentViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " j/k: navigate | Enter: view | n: new | Esc: close",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[1],
         );
     }
 
-    fn render_view(&self, frame: &mut Frame, inner: Rect) {
+    fn render_view(&self, frame: &mut Frame, inner: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
@@ -403,7 +404,7 @@ impl DocumentViewer {
             Paragraph::new(Line::from(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(s.accent)
                     .add_modifier(Modifier::BOLD),
             ))),
             chunks[0],
@@ -417,7 +418,7 @@ impl DocumentViewer {
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
-                        .border_style(Style::default().fg(Color::DarkGray)),
+                        .border_style(Style::default().fg(s.muted)),
                 ),
             chunks[1],
         );
@@ -425,13 +426,13 @@ impl DocumentViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " j/k: scroll | e: edit | Esc: back to list",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[2],
         );
     }
 
-    fn render_create(&self, frame: &mut Frame, inner: Rect) {
+    fn render_create(&self, frame: &mut Frame, inner: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Length(1), // Type field
             Constraint::Length(1), // Custom type (if applicable)
@@ -446,17 +447,17 @@ impl DocumentViewer {
         let type_marker = if type_focused { "▶ " } else { "  " };
         let type_val = DOC_TYPES[self.doc_type_index];
         let type_style = if type_focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(type_marker),
-                Span::styled("Type: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Type: ", Style::default().fg(s.accent)),
                 Span::styled(type_val, type_style),
                 if type_focused {
-                    Span::styled(" (j/k to cycle, Enter to select)", Style::default().fg(Color::DarkGray))
+                    Span::styled(" (j/k to cycle, Enter to select)", Style::default().fg(s.muted))
                 } else {
                     Span::raw("")
                 },
@@ -475,14 +476,14 @@ impl DocumentViewer {
                 self.custom_type_field.value().to_string()
             };
             let style = if editing {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().fg(s.fg).bg(s.selection)
             } else {
                 Style::default()
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled("Custom: ", Style::default().fg(Color::Cyan)),
+                    Span::styled("Custom: ", Style::default().fg(s.accent)),
                     Span::styled(display, style),
                 ])),
                 chunks[1],
@@ -501,16 +502,16 @@ impl DocumentViewer {
             self.title_field.value().to_string()
         };
         let title_style = if title_editing {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(s.fg).bg(s.selection)
         } else if title_focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(s.warning).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(title_marker),
-                Span::styled("Title: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Title: ", Style::default().fg(s.accent)),
                 Span::styled(title_display, title_style),
             ])),
             chunks[2],
@@ -527,13 +528,13 @@ impl DocumentViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 help,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[4],
         );
     }
 
-    fn render_edit(&self, frame: &mut Frame, inner: Rect) {
+    fn render_edit(&self, frame: &mut Frame, inner: Rect, s: &ThemeStyles) {
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
@@ -552,7 +553,7 @@ impl DocumentViewer {
             Paragraph::new(Line::from(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(s.warning)
                     .add_modifier(Modifier::BOLD),
             ))),
             chunks[0],
@@ -565,7 +566,7 @@ impl DocumentViewer {
             self.content_field.value().to_string()
         };
         let style = if self.content_field.is_editing() {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(s.fg).bg(s.selection)
         } else {
             Style::default()
         };
@@ -576,7 +577,7 @@ impl DocumentViewer {
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
-                        .border_style(Style::default().fg(Color::Yellow)),
+                        .border_style(Style::default().fg(s.warning)),
                 ),
             chunks[1],
         );
@@ -584,7 +585,7 @@ impl DocumentViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " Shift+Enter: newline | Enter: save | Esc: cancel",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[2],
         );
@@ -616,22 +617,23 @@ impl Component for DocumentViewer {
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
+        let s = theme.styles();
         let modal_title = match self.mode {
             Mode::Create => "New Document",
             _ => "Documents",
         };
-        let inner = modal::render_modal(frame, area, modal_title, 70, 70);
+        let inner = modal::render_modal_themed(frame, area, modal_title, 70, 70, Some(&s));
 
         match self.mode {
-            Mode::List => self.render_list(frame, inner),
-            Mode::View => self.render_view(frame, inner),
-            Mode::Create => self.render_create(frame, inner),
-            Mode::Edit => self.render_edit(frame, inner),
+            Mode::List => self.render_list(frame, inner, &s),
+            Mode::View => self.render_view(frame, inner, &s),
+            Mode::Create => self.render_create(frame, inner, &s),
+            Mode::Edit => self.render_edit(frame, inner, &s),
         }
     }
 }

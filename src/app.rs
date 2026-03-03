@@ -29,6 +29,7 @@ use crate::components::settings::Settings;
 use crate::components::status_bar::StatusBar;
 use crate::components::transcript_viewer::TranscriptViewer;
 use crate::config::hotkeys;
+use crate::config::theme::Theme;
 use crate::db;
 use crate::event::{Event, EventHandler};
 use crate::tmux::TmuxManager;
@@ -81,14 +82,20 @@ pub struct App {
     sync_handle: Option<tokio::task::JoinHandle<()>>,
     data_dir: PathBuf,
     transcript_capture: Option<TranscriptCaptureHandle>,
+    summarizer_handle: Option<tokio::task::JoinHandle<()>>,
     teams: Vec<Team>,
     projects: Vec<Project>,
     labels: Vec<Label>,
+    pending_external_editor: Option<(String, String)>, // (field_id, current_value)
+    theme: Theme,
 }
 
 impl App {
     pub fn new(db_conn: Connection, data_dir: PathBuf) -> Self {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
+
+        // Load active theme (seeded by migration 014)
+        let theme = db::config_repo::get_active_theme(&db_conn).unwrap_or_else(Theme::dark);
 
         let cached_issues = db::issue_repo::load_cached_issues(&db_conn).unwrap_or_default();
         let cached_states = db::issue_repo::load_workflow_states(&db_conn).unwrap_or_default();
@@ -127,14 +134,47 @@ impl App {
         let transcript_dir = data_dir.join("transcripts");
 
         // Start LLM summarizer if configured
-        if let Some(provider) = llm::create_provider(&db_conn) {
+        let summarizer_handle = if let Some(provider) = llm::create_provider(&db_conn) {
             tracing::info!("LLM provider configured: {}", provider.name());
             let summarizer = llm::summarizer::Summarizer::new(
                 provider,
                 transcript_dir.clone(),
                 action_tx.clone(),
             );
-            summarizer.start(Duration::from_secs(120));
+            Some(summarizer.start(Duration::from_secs(120)))
+        } else {
+            tracing::info!("No LLM provider configured — transcript summaries disabled. Configure one in Settings → LLM.");
+            None
+        };
+
+        // Check CWD against directory mappings for auto-filtering
+        let mut auto_team: Option<String> = None;
+        let mut auto_project: Option<String> = None;
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_str = cwd.display().to_string();
+            if let Ok(entries) = db::config_repo::list_config_by_prefix(&db_conn, "team_dir:") {
+                for (key, path) in &entries {
+                    if cwd_str == *path || cwd_str.starts_with(&format!("{path}/")) {
+                        auto_team = key.strip_prefix("team_dir:").map(|s| s.to_string());
+                        break;
+                    }
+                }
+            }
+            if let Ok(entries) = db::config_repo::list_config_by_prefix(&db_conn, "project_dir:") {
+                for (key, path) in &entries {
+                    if cwd_str == *path || cwd_str.starts_with(&format!("{path}/")) {
+                        auto_project = key.strip_prefix("project_dir:").map(|s| s.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if auto_team.is_some() {
+            issue_list.set_team_filter(auto_team);
+        }
+        if auto_project.is_some() {
+            issue_list.set_project_filter(auto_project, None);
         }
 
         Self {
@@ -165,9 +205,32 @@ impl App {
             sync_handle: None,
             data_dir,
             transcript_capture: None,
+            summarizer_handle,
             teams: cached_teams,
             projects: cached_projects,
             labels: cached_labels,
+            pending_external_editor: None,
+            theme,
+        }
+    }
+
+    /// (Re)start the LLM summarizer with the currently configured provider.
+    fn restart_summarizer(&mut self) {
+        // Stop existing summarizer if running
+        if let Some(handle) = self.summarizer_handle.take() {
+            handle.abort();
+        }
+        let transcript_dir = self.data_dir.join("transcripts");
+        if let Some(provider) = llm::create_provider(&self.db_conn) {
+            tracing::info!("Summarizer (re)started with provider: {}", provider.name());
+            let summarizer = llm::summarizer::Summarizer::new(
+                provider,
+                transcript_dir,
+                self.action_tx.clone(),
+            );
+            self.summarizer_handle = Some(summarizer.start(Duration::from_secs(120)));
+        } else {
+            tracing::info!("No LLM provider configured — summarizer stopped.");
         }
     }
 
@@ -192,15 +255,28 @@ impl App {
                 self.handle_action(action);
             }
 
+            // Handle pending external editor (needs terminal access)
+            if let Some((field_id, current_value)) = self.pending_external_editor.take() {
+                self.run_external_editor(&mut terminal, field_id, current_value)?;
+            }
+
             if let Some(event) = events.next().await {
                 let action = match event {
                     Event::Key(key) => self.dispatch_key(key),
-                    Event::Tick => None,
+                    Event::Tick => {
+                        self.status_bar.clear_transient();
+                        None
+                    }
                     Event::Resize(_, _) => None,
                 };
 
                 if let Some(action) = action {
                     self.handle_action(action);
+                }
+
+                // Handle pending external editor (needs terminal access)
+                if let Some((field_id, current_value)) = self.pending_external_editor.take() {
+                    self.run_external_editor(&mut terminal, field_id, current_value)?;
                 }
 
                 self.render(&mut terminal)?;
@@ -266,15 +342,15 @@ impl App {
     fn handle_focused_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
         // Global Ctrl combos
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return match key.code {
-                crossterm::event::KeyCode::Char('s') => Some(Action::OpenSettings),
-                crossterm::event::KeyCode::Char('p') => Some(Action::OpenCommandPalette),
+            match key.code {
+                crossterm::event::KeyCode::Char('s') => return Some(Action::OpenSettings),
+                crossterm::event::KeyCode::Char('p') => return Some(Action::OpenCommandPalette),
                 crossterm::event::KeyCode::Char('r') => {
                     self.cycle_pane_size();
-                    None
+                    return None;
                 }
-                _ => None,
-            };
+                _ => {} // fall through to focused panel
+            }
         }
 
         // Tab switches focus between panels when detail is showing
@@ -285,6 +361,10 @@ impl App {
                 FocusPanel::IssueList => FocusPanel::DetailPanel,
                 FocusPanel::DetailPanel => FocusPanel::IssueList,
             };
+            self.status_bar.set_context(match self.focus {
+                FocusPanel::IssueList => "list",
+                FocusPanel::DetailPanel => "detail",
+            });
             return None;
         }
 
@@ -430,12 +510,14 @@ impl App {
                 self.issue_detail.set_issue(issue);
                 self.bottom_panel = BottomPanel::IssueDetail;
                 self.focus = FocusPanel::DetailPanel;
+                self.status_bar.set_context("detail");
             }
             Action::Back => {
                 if self.bottom_panel == BottomPanel::IssueDetail {
                     self.issue_detail.clear();
                     self.bottom_panel = BottomPanel::Dashboard;
                     self.focus = FocusPanel::IssueList;
+                    self.status_bar.set_context("list");
                 }
             }
             Action::OpenNewIssue => {
@@ -452,6 +534,15 @@ impl App {
             Action::EditIssue(issue) => self.issue_edit.show(issue),
             Action::LaunchClaude(issue_id) => self.launch_claude(&issue_id),
             Action::CycleStatus(issue_id) => self.cycle_issue_status(&issue_id),
+            Action::SetStatus(issue_id, status_name) => self.set_issue_status(&issue_id, &status_name),
+            Action::OpenExternalEditor { field_id, current_value } => {
+                self.pending_external_editor = Some((field_id, current_value));
+            }
+            Action::ExternalEditorResult { field_id, new_value } => {
+                if field_id == "description" {
+                    self.issue_edit.set_description_value(&new_value);
+                }
+            }
             Action::SaveIssueUpdate(id, update) => self.save_issue_update(id, update),
             Action::CreateIssue(new_issue) => self.create_issue(new_issue),
             Action::IssueSaved(ref issue) => {
@@ -581,6 +672,11 @@ impl App {
                 )
                 .unwrap_or_default();
                 self.settings.set_accounts(accounts);
+                let dir_mappings = self.load_directory_mappings();
+                self.settings.set_directory_mappings(dir_mappings);
+                let team_names: Vec<String> = self.teams.iter().map(|t| t.name.clone()).collect();
+                let project_names: Vec<String> = self.projects.iter().map(|p| p.name.clone()).collect();
+                self.settings.set_known_teams_projects(team_names, project_names);
                 self.settings.show(hk);
             }
             Action::ShowHelp => {
@@ -603,6 +699,17 @@ impl App {
                         Ok(results) => self.search.set_results(results),
                         Err(e) => tracing::error!("Search failed: {e}"),
                     }
+                }
+            }
+            Action::SearchSelect { source_type, issue_id, .. } => {
+                // For any search result type, navigate to the associated issue
+                if let Some(issue) = self.issue_list.find_issue(&issue_id) {
+                    let issue = issue.clone();
+                    self.handle_action(Action::ShowIssueDetail(issue));
+                } else {
+                    let _ = self.action_tx.send(Action::Error(
+                        format!("Issue not found for {source_type} result — try refreshing"),
+                    ));
                 }
             }
             Action::OpenTeamFilter => {
@@ -663,6 +770,10 @@ impl App {
                             if id.is_some() { "Account updated".into() } else { "Account created".into() }
                         ));
                         let _ = self.action_tx.send(Action::LoadAccounts);
+                        // Restart summarizer if an LLM account was saved
+                        if provider != "linear" {
+                            self.restart_summarizer();
+                        }
                     }
                     Err(e) => {
                         let _ = self.action_tx.send(Action::Error(format!("Failed to save account: {e}")));
@@ -675,6 +786,8 @@ impl App {
                 } else {
                     let _ = self.action_tx.send(Action::StatusMessage("Account deleted".into()));
                     let _ = self.action_tx.send(Action::LoadAccounts);
+                    // Restart summarizer in case active LLM provider was deleted
+                    self.restart_summarizer();
                 }
             }
             Action::SwitchAccount(id) => {
@@ -704,8 +817,9 @@ impl App {
                             if let Some(u) = &ollama_url {
                                 let _ = db::config_repo::set_config(&self.db_conn, "llm_ollama_url", u);
                             }
+                            self.restart_summarizer();
                             let _ = self.action_tx.send(Action::StatusMessage(
-                                format!("LLM switched to: {} (restart to take effect)", account.name)
+                                format!("LLM switched to: {}", account.name)
                             ));
                         }
                         let _ = self.action_tx.send(Action::LoadAccounts);
@@ -727,6 +841,50 @@ impl App {
                 self.settings.set_accounts(accounts);
             }
             Action::AccountsLoaded(_) => {} // handled in settings.update()
+            Action::SaveDirectoryMapping { mapping_type, name, path } => {
+                let key = format!("{mapping_type}_dir:{name}");
+                if let Err(e) = db::config_repo::set_config(&self.db_conn, &key, &path) {
+                    let _ = self.action_tx.send(Action::Error(format!("Failed to save mapping: {e}")));
+                } else {
+                    let _ = self.action_tx.send(Action::StatusMessage("Directory mapping saved".into()));
+                    let _ = self.action_tx.send(Action::LoadDirectoryMappings);
+                }
+            }
+            Action::DeleteDirectoryMapping { key } => {
+                if let Err(e) = db::config_repo::delete_config(&self.db_conn, &key) {
+                    let _ = self.action_tx.send(Action::Error(format!("Failed to delete mapping: {e}")));
+                } else {
+                    let _ = self.action_tx.send(Action::StatusMessage("Mapping deleted".into()));
+                    let _ = self.action_tx.send(Action::LoadDirectoryMappings);
+                }
+            }
+            Action::LoadDirectoryMappings => {
+                let mappings = self.load_directory_mappings();
+                self.settings.set_directory_mappings(mappings);
+            }
+            Action::DirectoryMappingsLoaded(_) => {} // handled in settings.update()
+            Action::SetTheme(name) => {
+                // Find theme by name from builtins or custom
+                let new_theme = Theme::builtin_themes()
+                    .into_iter()
+                    .find(|t| t.name == name)
+                    .or_else(|| {
+                        if let Some(dirs) = directories::ProjectDirs::from("", "", "ctxrecall") {
+                            crate::config::theme::load_custom_theme(dirs.config_dir())
+                                .filter(|t| t.name == name || name == "custom")
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(theme) = new_theme {
+                    if let Err(e) = db::config_repo::set_active_theme(&self.db_conn, &name, &theme) {
+                        let _ = self.action_tx.send(Action::Error(format!("Failed to save theme: {e}")));
+                    } else {
+                        let _ = self.action_tx.send(Action::StatusMessage(format!("Theme: {name}")));
+                        self.theme = theme;
+                    }
+                }
+            }
             Action::Refresh => {
                 let _ = self
                     .action_tx
@@ -797,6 +955,97 @@ impl App {
             "Changing status to {next_name}..."
         )));
         self.save_issue_update(issue_id.to_string(), update);
+    }
+
+    fn set_issue_status(&self, issue_id: &str, status_name: &str) {
+        let Some(issue) = self.issue_list.find_issue(issue_id) else {
+            return;
+        };
+        let team_id = issue.team_id.as_deref().unwrap_or("");
+        let cycle = self.issue_list.status_cycle_for_team(team_id);
+
+        // Case-insensitive prefix match
+        let matched = cycle.iter().find(|(name, _)| {
+            name.to_lowercase().starts_with(&status_name.to_lowercase())
+        });
+
+        let Some((matched_name, matched_id)) = matched else {
+            let _ = self.action_tx.send(Action::Error(format!("No status matching '{status_name}' found")));
+            return;
+        };
+
+        // Don't update if already in this status
+        if issue.status.to_lowercase() == matched_name.to_lowercase() {
+            let _ = self.action_tx.send(Action::StatusMessage(format!("Already {matched_name}")));
+            return;
+        }
+
+        let update = crate::tracker::types::IssueUpdate {
+            status_id: Some(matched_id.to_string()),
+            ..Default::default()
+        };
+        let _ = self.action_tx.send(Action::StatusMessage(format!("Setting status to {matched_name}...")));
+        self.save_issue_update(issue_id.to_string(), update);
+    }
+
+    fn run_external_editor(
+        &mut self,
+        terminal: &mut Tui,
+        field_id: String,
+        current_value: String,
+    ) -> color_eyre::Result<()> {
+        use std::io::Write;
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+        let mut tmp = tempfile::NamedTempFile::new()?;
+        tmp.write_all(current_value.as_bytes())?;
+        tmp.flush()?;
+        let tmp_path = tmp.path().to_path_buf();
+
+        // Suspend TUI — leave alternate screen and disable raw mode
+        tui::restore()?;
+
+        // Run editor synchronously
+        let status = std::process::Command::new(&editor)
+            .arg(&tmp_path)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        // Resume TUI
+        *terminal = tui::init()?;
+
+        match status {
+            Ok(s) if s.success() => {
+                let new_value = std::fs::read_to_string(&tmp_path).unwrap_or(current_value);
+                self.handle_action(Action::ExternalEditorResult { field_id, new_value });
+            }
+            Ok(_) => {
+                let _ = self.action_tx.send(Action::Error("Editor exited with error".into()));
+            }
+            Err(e) => {
+                let _ = self.action_tx.send(Action::Error(format!("Failed to launch {editor}: {e}")));
+            }
+        }
+        Ok(())
+    }
+
+    fn load_directory_mappings(&self) -> Vec<(String, String, String)> {
+        let mut mappings = Vec::new();
+        if let Ok(team_entries) = db::config_repo::list_config_by_prefix(&self.db_conn, "team_dir:") {
+            for (key, path) in team_entries {
+                let name = key.strip_prefix("team_dir:").unwrap_or(&key).to_string();
+                mappings.push(("team".into(), name, path));
+            }
+        }
+        if let Ok(project_entries) = db::config_repo::list_config_by_prefix(&self.db_conn, "project_dir:") {
+            for (key, path) in project_entries {
+                let name = key.strip_prefix("project_dir:").unwrap_or(&key).to_string();
+                mappings.push(("project".into(), name, path));
+            }
+        }
+        mappings
     }
 
     fn save_issue_update(&self, issue_id: String, update: crate::tracker::types::IssueUpdate) {
@@ -1060,6 +1309,7 @@ impl App {
     }
 
     fn render(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
+        let theme = &self.theme;
         terminal.draw(|frame| {
             let chunks = Layout::vertical([
                 Constraint::Percentage(50),
@@ -1069,28 +1319,28 @@ impl App {
             .split(frame.area());
 
             // Top: issue list (highlight border if focused)
-            self.issue_list.render(frame, chunks[0]);
+            self.issue_list.render(frame, chunks[0], theme);
 
             // Bottom: dashboard or issue detail
             match self.bottom_panel {
-                BottomPanel::Dashboard => self.dashboard.render(frame, chunks[1]),
-                BottomPanel::IssueDetail => self.issue_detail.render(frame, chunks[1]),
+                BottomPanel::Dashboard => self.dashboard.render(frame, chunks[1], theme),
+                BottomPanel::IssueDetail => self.issue_detail.render(frame, chunks[1], theme),
             }
 
             // Status bar
-            self.status_bar.render(frame, chunks[2]);
+            self.status_bar.render(frame, chunks[2], theme);
 
             // Overlays (order matters — last rendered is on top)
-            self.issue_create.render(frame, frame.area());
-            self.issue_edit.render(frame, frame.area());
-            self.transcript_viewer.render(frame, frame.area());
-            self.document_viewer.render(frame, frame.area());
-            self.filter_picker.render(frame, frame.area());
-            self.search.render(frame, frame.area());
-            self.settings.render(frame, frame.area());
-            self.account_picker.render(frame, frame.area());
-            self.command_palette.render(frame, frame.area());
-            self.help_overlay.render(frame, frame.area());
+            self.issue_create.render(frame, frame.area(), theme);
+            self.issue_edit.render(frame, frame.area(), theme);
+            self.transcript_viewer.render(frame, frame.area(), theme);
+            self.document_viewer.render(frame, frame.area(), theme);
+            self.filter_picker.render(frame, frame.area(), theme);
+            self.search.render(frame, frame.area(), theme);
+            self.settings.render(frame, frame.area(), theme);
+            self.account_picker.render(frame, frame.area(), theme);
+            self.command_palette.render(frame, frame.area(), theme);
+            self.help_overlay.render(frame, frame.area(), theme);
         })?;
         Ok(())
     }

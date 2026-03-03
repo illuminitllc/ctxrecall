@@ -59,6 +59,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "012_document_file_path",
         include_str!("../../migrations/012_document_file_path.sql"),
     ),
+    (
+        "013_status_hotkeys",
+        include_str!("../../migrations/013_status_hotkeys.sql"),
+    ),
+    (
+        "014_seed_themes",
+        include_str!("../../migrations/014_seed_themes.sql"),
+    ),
+    (
+        "015_add_nord_last_horizon_themes",
+        include_str!("../../migrations/015_add_nord_last_horizon_themes.sql"),
+    ),
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection, AppError> {

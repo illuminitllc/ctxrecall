@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListState, Paragraph, Tabs, Wrap};
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 use crate::widgets::modal;
 
 use super::Component;
@@ -154,12 +155,13 @@ impl Component for TranscriptViewer {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
-        let inner = modal::render_modal(frame, area, "Transcripts", 85, 80);
+        let s = theme.styles();
+        let inner = modal::render_modal_themed(frame, area, "Transcripts", 85, 80, Some(&s));
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Tab bar
@@ -177,8 +179,8 @@ impl Component for TranscriptViewer {
         };
         let tabs = Tabs::new(tab_titles)
             .select(selected_tab)
-            .style(Style::default().fg(Color::DarkGray))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .style(Style::default().fg(s.muted))
+            .highlight_style(Style::default().fg(s.warning).add_modifier(Modifier::BOLD));
         frame.render_widget(tabs, chunks[0]);
 
         // File info
@@ -191,7 +193,7 @@ impl Component for TranscriptViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 file_info,
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(s.accent),
             ))),
             chunks[1],
         );
@@ -203,7 +205,7 @@ impl Component for TranscriptViewer {
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(s.muted)),
             );
         frame.render_widget(content, chunks[2]);
 
@@ -211,7 +213,7 @@ impl Component for TranscriptViewer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " Tab: switch | n/p: files | j/k: scroll | Esc: close",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[3],
         );

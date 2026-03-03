@@ -5,6 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
+use crate::config::theme::ThemeStyles;
+
 pub struct Dropdown {
     label: String,
     items: Vec<String>,
@@ -86,21 +88,29 @@ impl Dropdown {
     }
 
     pub fn render_inline(&self, frame: &mut Frame, area: Rect) {
+        self.render_inline_themed(frame, area, None);
+    }
+
+    pub fn render_inline_themed(&self, frame: &mut Frame, area: Rect, styles: Option<&ThemeStyles>) {
+        let accent = styles.map_or(Color::Cyan, |s| s.accent);
+        let warning = styles.map_or(Color::Yellow, |s| s.warning);
+        let fg = styles.map_or(Color::White, |s| s.fg);
+
         let display = self
             .selected_value()
             .unwrap_or("(none)")
             .to_string();
 
         let style = if self.open {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(warning)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(fg)
         };
 
         let line = Line::from(vec![
             Span::styled(
                 format!("{}: ", self.label),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{display} [v]"), style),
         ]);
@@ -109,9 +119,16 @@ impl Dropdown {
     }
 
     pub fn render_popup(&self, frame: &mut Frame, area: Rect) {
+        self.render_popup_themed(frame, area, None);
+    }
+
+    pub fn render_popup_themed(&self, frame: &mut Frame, area: Rect, styles: Option<&ThemeStyles>) {
         if !self.open {
             return;
         }
+
+        let warning = styles.map_or(Color::Yellow, |s| s.warning);
+        let selection = styles.map_or(Color::DarkGray, |s| s.selection);
 
         let height = (self.items.len() as u16 + 2).min(area.height);
         let width = self
@@ -143,11 +160,11 @@ impl Dropdown {
                 Block::default()
                     .title(format!(" {} ", self.label))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow)),
+                    .border_style(Style::default().fg(warning)),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");

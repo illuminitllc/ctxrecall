@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::action::Action;
+use crate::config::theme::{Theme, ThemeStyles};
 use crate::tracker::types::{Issue, IssueStatus};
 
 use super::Component;
@@ -255,13 +256,13 @@ impl IssueList {
         }
     }
 
-    fn bottom_title(&self) -> Option<Line<'_>> {
+    fn bottom_title_themed(&self, s: &ThemeStyles) -> Option<Line<'_>> {
         match (&self.team_filter, &self.project_filter) {
             (Some(team), Some(project)) => Some(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
                     format!("{team} / {project}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(s.warning),
                 ),
                 Span::raw(" "),
             ])),
@@ -269,7 +270,7 @@ impl IssueList {
                 Span::raw(" "),
                 Span::styled(
                     format!("Team: {team}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(s.warning),
                 ),
                 Span::raw(" "),
             ])),
@@ -277,26 +278,26 @@ impl IssueList {
         }
     }
 
-    fn format_issue_item<'a>(&self, issue: &'a Issue, width: u16) -> ListItem<'a> {
+    fn format_issue_item_themed<'a>(&self, issue: &'a Issue, width: u16, s: &'a ThemeStyles) -> ListItem<'a> {
         let is_claude_active = self
             .active_claude_issue_id
             .as_deref()
             .map(|id| id == issue.id)
             .unwrap_or(false);
-        Self::format_issue(issue, is_claude_active, width)
+        Self::format_issue_themed(issue, is_claude_active, width, s)
     }
 
-    fn format_issue(issue: &Issue, claude_active: bool, width: u16) -> ListItem<'_> {
+    fn format_issue_themed<'a>(issue: &'a Issue, claude_active: bool, width: u16, s: &'a ThemeStyles) -> ListItem<'a> {
         let status_color = match issue.status.as_str() {
-            "In Progress" => Color::Yellow,
-            "Done" | "Completed" => Color::Green,
-            "Canceled" | "Cancelled" => Color::Red,
-            "Backlog" => Color::DarkGray,
-            _ => Color::White,
+            "In Progress" => s.warning,
+            "Done" | "Completed" => s.success,
+            "Canceled" | "Cancelled" => s.error,
+            "Backlog" => s.muted,
+            _ => s.fg,
         };
 
         let claude_indicator = if claude_active {
-            Span::styled(" ", Style::default().fg(Color::Green))
+            Span::styled(" ", Style::default().fg(s.success))
         } else {
             Span::raw("  ")
         };
@@ -310,7 +311,7 @@ impl IssueList {
                 claude_indicator,
                 Span::styled(
                     format!("{:<8}", truncate(&issue.identifier, 8)),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(s.accent),
                 ),
                 Span::raw(" "),
                 Span::raw(truncate(&issue.title, title_max)),
@@ -334,7 +335,7 @@ impl IssueList {
             claude_indicator,
             Span::styled(
                 format!("{:<10}", issue.identifier),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(s.accent),
             ),
             Span::raw(" │ "),
             Span::styled(
@@ -347,7 +348,7 @@ impl IssueList {
                 Style::default().fg(status_color),
             ),
             Span::raw(" │ "),
-            Span::styled(assignee, Style::default().fg(Color::Magenta)),
+            Span::styled(assignee, Style::default().fg(s.accent)),
         ]);
 
         ListItem::new(line)
@@ -369,6 +370,10 @@ impl Component for IssueList {
             return match key.code {
                 KeyCode::Char('s') => Some(Action::OpenSettings),
                 KeyCode::Char('p') => Some(Action::OpenCommandPalette),
+                KeyCode::Char('d') => self.selected_issue().map(|i| Action::SetStatus(i.id.clone(), "Done".into())),
+                KeyCode::Char('b') => self.selected_issue().map(|i| Action::SetStatus(i.id.clone(), "Backlog".into())),
+                KeyCode::Char('t') => self.selected_issue().map(|i| Action::SetStatus(i.id.clone(), "Todo".into())),
+                KeyCode::Char('i') => self.selected_issue().map(|i| Action::SetStatus(i.id.clone(), "In Progress".into())),
                 _ => None,
             };
         }
@@ -461,7 +466,8 @@ impl Component for IssueList {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let s = theme.styles();
         // Inner width (minus 2 for borders)
         let inner_width = area.width.saturating_sub(2);
         let items: Vec<ListItem> = if self.filtered.is_empty() {
@@ -472,18 +478,18 @@ impl Component for IssueList {
             };
             vec![ListItem::new(Line::from(vec![Span::styled(
                 msg,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             )]))]
         } else {
-            self.filtered.iter().map(|i| self.format_issue_item(i, inner_width)).collect()
+            self.filtered.iter().map(|i| self.format_issue_item_themed(i, inner_width, &s)).collect()
         };
 
         let mut block = Block::default()
             .title(self.title())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(s.border));
 
-        if let Some(bottom) = self.bottom_title() {
+        if let Some(bottom) = self.bottom_title_themed(&s) {
             block = block.title_bottom(bottom);
         }
 
@@ -491,7 +497,7 @@ impl Component for IssueList {
             .block(block)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");

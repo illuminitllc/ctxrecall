@@ -91,6 +91,11 @@ pub fn import_config(conn: &Connection, path: &Path) -> Result<AppConfig, AppErr
         crate::db::config_repo::set_config(conn, "llm_model", model)?;
     }
 
+    // Import theme
+    if let Some(ref theme) = config.theme {
+        crate::db::config_repo::set_active_theme(conn, &theme.name, theme)?;
+    }
+
     tracing::info!("Config imported from {}", path.display());
     Ok(config)
 }
@@ -119,10 +124,12 @@ pub fn export_config(conn: &Connection, path: &Path) -> Result<(), AppError> {
         accounts.push(row);
     }
 
+    let theme = crate::db::config_repo::get_active_theme(conn);
+
     let config = AppConfig {
         general: GeneralConfig::default(),
         hotkeys,
-        theme: None,
+        theme,
         accounts,
         llm: LlmConfig::default(),
     };

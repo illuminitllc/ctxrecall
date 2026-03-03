@@ -45,6 +45,9 @@ pub enum Action {
     CreateIssue(NewIssue),
     IssueSaved(Issue),
     CycleStatus(String),
+    SetStatus(String, String), // (issue_id, status_name)
+    OpenExternalEditor { field_id: String, current_value: String },
+    ExternalEditorResult { field_id: String, new_value: String },
     ViewTranscripts(String),
     ViewDocuments(String),
     CreateDocument { issue_id: String, doc_type: String, title: String },
@@ -53,6 +56,7 @@ pub enum Action {
 
     SearchQuery(String),
     SearchResults(Vec<crate::db::search_repo::SearchResult>),
+    SearchSelect { source_type: String, source_id: String, issue_id: String },
 
     // Issue creation
     OpenNewIssue,
@@ -76,4 +80,13 @@ pub enum Action {
     SwitchAccount(String),          // account id
     LoadAccounts,
     AccountsLoaded(Vec<AccountRow>),
+
+    // Directory mappings
+    SaveDirectoryMapping { mapping_type: String, name: String, path: String },
+    DeleteDirectoryMapping { key: String },
+    LoadDirectoryMappings,
+    DirectoryMappingsLoaded(Vec<(String, String, String)>), // (type, name, path)
+
+    // Theme
+    SetTheme(String), // theme name
 }

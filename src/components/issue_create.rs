@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::action::Action;
+use crate::config::theme::{Theme, ThemeStyles};
 use crate::tracker::types::{Issue, IssueStatus, Label, NewIssue, Project, Team};
 use crate::widgets::editable_field::{EditFieldAction, EditableField};
 use crate::widgets::modal;
@@ -379,14 +380,14 @@ impl IssueCreate {
         // If a text field is being edited, delegate to it
         if self.title_field.is_editing() {
             match self.title_field.handle_key(key) {
-                EditFieldAction::Submit | EditFieldAction::Cancel => {}
+                EditFieldAction::Submit | EditFieldAction::Cancel | EditFieldAction::OpenExternal => {}
                 EditFieldAction::None => {}
             }
             return None;
         }
         if self.description_field.is_editing() {
             match self.description_field.handle_key(key) {
-                EditFieldAction::Submit | EditFieldAction::Cancel => {}
+                EditFieldAction::Submit | EditFieldAction::Cancel | EditFieldAction::OpenExternal => {}
                 EditFieldAction::None => {}
             }
             return None;
@@ -476,8 +477,8 @@ impl IssueCreate {
         }
     }
 
-    fn render_select_team(&self, frame: &mut Frame, area: Rect) {
-        let inner = modal::render_modal(frame, area, "New Issue — Select Team", 50, 50);
+    fn render_select_team(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
+        let inner = modal::render_modal_themed(frame, area, "New Issue — Select Team", 50, 50, Some(s));
 
         if self.teams.is_empty() {
             frame.render_widget(
@@ -494,7 +495,7 @@ impl IssueCreate {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{key} "),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(s.muted),
                     ),
                     Span::raw(name.as_str()),
                 ]))
@@ -504,7 +505,7 @@ impl IssueCreate {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");
@@ -512,17 +513,17 @@ impl IssueCreate {
         frame.render_stateful_widget(list, inner, &mut self.team_state.clone());
     }
 
-    fn render_select_project(&self, frame: &mut Frame, area: Rect) {
+    fn render_select_project(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         let title = if let Some((_, name, _)) = &self.selected_team {
             format!("New Issue — Select Project ({name})")
         } else {
             "New Issue — Select Project".to_string()
         };
-        let inner = modal::render_modal(frame, area, &title, 50, 50);
+        let inner = modal::render_modal_themed(frame, area, &title, 50, 50, Some(s));
 
         let mut items: Vec<ListItem> = vec![ListItem::new(Line::from(Span::styled(
             "None",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(s.warning),
         )))];
 
         for (_, name) in &self.projects {
@@ -532,7 +533,7 @@ impl IssueCreate {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");
@@ -540,8 +541,8 @@ impl IssueCreate {
         frame.render_stateful_widget(list, inner, &mut self.project_state.clone());
     }
 
-    fn render_edit_fields(&self, frame: &mut Frame, area: Rect) {
-        let inner = modal::render_modal(frame, area, "New Issue", 70, 70);
+    fn render_edit_fields(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
+        let inner = modal::render_modal_themed(frame, area, "New Issue", 70, 70, Some(s));
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Identifier preview
@@ -561,12 +562,12 @@ impl IssueCreate {
         // Identifier preview
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  Identifier: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Identifier: ", Style::default().fg(s.muted)),
                 Span::styled(
                     &self.identifier_preview,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(s.muted),
                 ),
-                Span::styled(" (preview)", Style::default().fg(Color::DarkGray)),
+                Span::styled(" (preview)", Style::default().fg(s.muted)),
             ])),
             chunks[0],
         );
@@ -583,10 +584,10 @@ impl IssueCreate {
             self.title_field.value().to_string()
         };
         let title_style = if title_editing {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(s.fg).bg(s.selection)
         } else if title_focused {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(s.warning)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -594,7 +595,7 @@ impl IssueCreate {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(marker),
-                Span::styled("Title: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Title: ", Style::default().fg(s.accent)),
                 Span::styled(title_display, title_style),
             ])),
             chunks[1],
@@ -604,11 +605,11 @@ impl IssueCreate {
         let desc_focused = matches!(self.focused_field, CreateField::Description);
         let desc_editing = self.description_field.is_editing();
         let border_style = if desc_editing {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(s.warning)
         } else if desc_focused {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(s.accent)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(s.muted)
         };
         let desc_marker = if desc_focused { "▶ " } else { "  " };
         let desc_block = Block::default()
@@ -627,7 +628,7 @@ impl IssueCreate {
             self.description_field.value().to_string()
         };
         let desc_style = if desc_editing {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(s.fg).bg(s.selection)
         } else {
             Style::default()
         };
@@ -642,12 +643,13 @@ impl IssueCreate {
         // Priority
         let pri_focused = matches!(self.focused_field, CreateField::Priority);
         let pri_label = PRIORITY_LABELS.get(self.priority).unwrap_or(&"Unknown");
-        render_cycle_field(
+        render_cycle_field_themed(
             frame,
             chunks[5],
             "Priority",
             pri_label,
             pri_focused,
+            s,
         );
 
         // Status
@@ -657,7 +659,7 @@ impl IssueCreate {
             .get(self.status_idx)
             .map(|(_, n)| n.as_str())
             .unwrap_or("(none)");
-        render_cycle_field(frame, chunks[6], "Status", status_label, status_focused);
+        render_cycle_field_themed(frame, chunks[6], "Status", status_label, status_focused, s);
 
         // Assignee
         let assignee_focused = matches!(self.focused_field, CreateField::Assignee);
@@ -669,12 +671,13 @@ impl IssueCreate {
                 .map(|(_, n)| n.as_str())
                 .unwrap_or("None")
         };
-        render_cycle_field(
+        render_cycle_field_themed(
             frame,
             chunks[7],
             "Assignee",
             assignee_label,
             assignee_focused,
+            s,
         );
 
         // Labels
@@ -691,7 +694,7 @@ impl IssueCreate {
         };
         let labels_style = if labels_focused {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(s.warning)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -699,10 +702,10 @@ impl IssueCreate {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(label_marker),
-                Span::styled("Labels: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Labels: ", Style::default().fg(s.accent)),
                 Span::styled(labels_display, labels_style),
                 if labels_focused {
-                    Span::styled(" (Enter to pick)", Style::default().fg(Color::DarkGray))
+                    Span::styled(" (Enter to pick)", Style::default().fg(s.muted))
                 } else {
                     Span::raw("")
                 },
@@ -719,18 +722,18 @@ impl IssueCreate {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 help_text,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[10],
         );
     }
 
-    fn render_select_labels(&self, frame: &mut Frame, area: Rect) {
+    fn render_select_labels(&self, frame: &mut Frame, area: Rect, s: &ThemeStyles) {
         // First render the edit fields behind
-        self.render_edit_fields(frame, area);
+        self.render_edit_fields(frame, area, s);
 
         // Then overlay the label picker
-        let inner = modal::render_modal(frame, area, "Select Labels", 40, 50);
+        let inner = modal::render_modal_themed(frame, area, "Select Labels", 40, 50, Some(s));
 
         if self.filtered_labels.is_empty() {
             frame.render_widget(
@@ -759,7 +762,7 @@ impl IssueCreate {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");
@@ -771,7 +774,7 @@ impl IssueCreate {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " Space: toggle | Enter: confirm | Esc: cancel",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(s.muted),
             ))),
             chunks[1],
         );
@@ -792,16 +795,17 @@ impl Component for IssueCreate {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
+        let s = theme.styles();
         match self.phase {
-            CreatePhase::SelectTeam => self.render_select_team(frame, area),
-            CreatePhase::SelectProject => self.render_select_project(frame, area),
-            CreatePhase::EditFields => self.render_edit_fields(frame, area),
-            CreatePhase::SelectLabels => self.render_select_labels(frame, area),
+            CreatePhase::SelectTeam => self.render_select_team(frame, area, &s),
+            CreatePhase::SelectProject => self.render_select_project(frame, area, &s),
+            CreatePhase::EditFields => self.render_edit_fields(frame, area, &s),
+            CreatePhase::SelectLabels => self.render_select_labels(frame, area, &s),
         }
     }
 }
@@ -841,17 +845,18 @@ fn insert_cursor(text: &str, cursor: usize) -> String {
     format!("{before}│{after}")
 }
 
-fn render_cycle_field(
+fn render_cycle_field_themed(
     frame: &mut Frame,
     area: Rect,
     label: &str,
     value: &str,
     focused: bool,
+    s: &ThemeStyles,
 ) {
     let marker = if focused { "▶ " } else { "  " };
     let val_style = if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(s.warning)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -859,10 +864,10 @@ fn render_cycle_field(
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(marker),
-            Span::styled(format!("{label}: "), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{label}: "), Style::default().fg(s.accent)),
             Span::styled(value, val_style),
             if focused {
-                Span::styled(" (Enter to cycle)", Style::default().fg(Color::DarkGray))
+                Span::styled(" (Enter to cycle)", Style::default().fg(s.muted))
             } else {
                 Span::raw("")
             },

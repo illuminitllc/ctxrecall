@@ -1,5 +1,37 @@
+use std::path::Path;
+
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+
+/// Pre-converted theme colors for use in render methods.
+/// Avoids calling `parse_color()` on every frame.
+pub struct ThemeStyles {
+    pub bg: Color,
+    pub fg: Color,
+    pub accent: Color,
+    pub selection: Color,
+    pub border: Color,
+    pub error: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub muted: Color,
+}
+
+impl From<&Theme> for ThemeStyles {
+    fn from(theme: &Theme) -> Self {
+        Self {
+            bg: Theme::parse_color(&theme.bg),
+            fg: Theme::parse_color(&theme.fg),
+            accent: Theme::parse_color(&theme.accent),
+            selection: Theme::parse_color(&theme.selection),
+            border: Theme::parse_color(&theme.border),
+            error: Theme::parse_color(&theme.error),
+            success: Theme::parse_color(&theme.success),
+            warning: Theme::parse_color(&theme.warning),
+            muted: Theme::parse_color(&theme.muted),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
@@ -76,12 +108,44 @@ impl Theme {
         }
     }
 
+    pub fn nord() -> Self {
+        Self {
+            name: "nord".into(),
+            bg: "#2e3440".into(),
+            fg: "#d8dee9".into(),
+            accent: "#88c0d0".into(),
+            selection: "#3b4252".into(),
+            border: "#4c566a".into(),
+            error: "#bf616a".into(),
+            success: "#a3be8c".into(),
+            warning: "#ebcb8b".into(),
+            muted: "#616e88".into(),
+        }
+    }
+
+    pub fn last_horizon() -> Self {
+        Self {
+            name: "last-horizon".into(),
+            bg: "#0c0b0c".into(),
+            fg: "#e2dddc".into(),
+            accent: "#b59790".into(),
+            selection: "#3a2f30".into(),
+            border: "#3a2f30".into(),
+            error: "#c4d8e2".into(),
+            success: "#87a9b0".into(),
+            warning: "#c38b7b".into(),
+            muted: "#9b7369".into(),
+        }
+    }
+
     pub fn builtin_themes() -> Vec<Theme> {
         vec![
             Self::dark(),
             Self::light(),
             Self::solarized(),
             Self::gruvbox(),
+            Self::nord(),
+            Self::last_horizon(),
         ]
     }
 
@@ -95,4 +159,20 @@ impl Theme {
         let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
         Color::Rgb(r, g, b)
     }
+
+    /// Convenience: get pre-converted styles for use in render methods.
+    pub fn styles(&self) -> ThemeStyles {
+        ThemeStyles::from(self)
+    }
+}
+
+/// Load a custom theme from `{config_dir}/theme.conf` (TOML format).
+pub fn load_custom_theme(config_dir: &Path) -> Option<Theme> {
+    let path = config_dir.join("theme.conf");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let mut theme: Theme = toml::from_str(&content).ok()?;
+    if theme.name.is_empty() {
+        theme.name = "custom".into();
+    }
+    Some(theme)
 }

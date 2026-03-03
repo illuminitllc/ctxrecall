@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 use crate::widgets::modal;
 
 use super::Component;
@@ -181,12 +182,13 @@ impl Component for CommandPalette {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
 
-        let inner = modal::render_modal(frame, area, "Command Palette", 50, 40);
+        let s = theme.styles();
+        let inner = modal::render_modal_themed(frame, area, "Command Palette", 50, 40, Some(&s));
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Input
@@ -202,13 +204,13 @@ impl Component for CommandPalette {
             self.query.clone()
         };
         let style = if self.query.is_empty() {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(s.muted)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(s.fg)
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" > ", Style::default().fg(Color::Yellow)),
+                Span::styled(" > ", Style::default().fg(s.warning)),
                 Span::styled(display, style),
             ])),
             chunks[0],
@@ -223,12 +225,12 @@ impl Component for CommandPalette {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{:<20}", cmd.name),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(s.fg),
                     ),
-                    Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),
+                    Span::styled(cmd.description, Style::default().fg(s.muted)),
                     Span::styled(
                         format!("  {}", cmd.hotkey),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(s.warning),
                     ),
                 ]))
             })
@@ -237,7 +239,7 @@ impl Component for CommandPalette {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");

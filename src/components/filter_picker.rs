@@ -3,11 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 use crate::tracker::types::{Issue, Team, Project};
 use crate::widgets::modal;
 
@@ -221,17 +222,19 @@ impl Component for FilterPicker {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
+
+        let s = theme.styles();
 
         let title = match self.mode {
             FilterPickerMode::Team => "Filter by Team",
             FilterPickerMode::Project => "Filter by Project",
         };
 
-        let inner = modal::render_modal(frame, area, title, 50, 50);
+        let inner = modal::render_modal_themed(frame, area, title, 50, 50, Some(&s));
 
         if self.items.is_empty() {
             return;
@@ -243,7 +246,7 @@ impl Component for FilterPicker {
             .map(|item| match item {
                 PickerItem::Selectable { label, value, .. } => {
                     let style = if value.is_none() {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(s.warning)
                     } else {
                         Style::default()
                     };
@@ -254,7 +257,7 @@ impl Component for FilterPicker {
                     ListItem::new(Line::from(Span::styled(
                         header,
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(s.accent)
                             .add_modifier(Modifier::BOLD),
                     )))
                 }
@@ -264,7 +267,7 @@ impl Component for FilterPicker {
         let list = List::new(items)
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(s.selection)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");

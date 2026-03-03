@@ -1,11 +1,12 @@
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 use crate::widgets::modal;
 
 use super::Component;
@@ -60,6 +61,10 @@ impl HelpOverlay {
                 ("r", "Refresh issues"),
                 ("/", "Search"),
                 ("h", "Show this help"),
+                ("Ctrl-d", "Set status: Done"),
+                ("Ctrl-b", "Set status: Backlog"),
+                ("Ctrl-t", "Set status: Todo"),
+                ("Ctrl-i", "Set status: In Progress"),
                 ("Ctrl-r", "Cycle pane size"),
                 ("Ctrl-s", "Settings"),
                 ("Ctrl-p", "Command palette"),
@@ -79,6 +84,10 @@ impl HelpOverlay {
                 ("r", "Refresh"),
                 ("/", "Search"),
                 ("h", "Show this help"),
+                ("Ctrl-d", "Set status: Done"),
+                ("Ctrl-b", "Set status: Backlog"),
+                ("Ctrl-t", "Set status: Todo"),
+                ("Ctrl-i", "Set status: In Progress"),
                 ("Esc/q", "Back to list"),
             ],
         }
@@ -92,10 +101,12 @@ impl Component for HelpOverlay {
         Some(Action::HideHelp)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
         }
+
+        let s = theme.styles();
 
         let title = match self.context {
             HelpContext::IssueList => "Help: Issue List",
@@ -105,9 +116,9 @@ impl Component for HelpOverlay {
         // Scale modal to fit: use most of the available area
         let pct_x = if area.width < 60 { 95 } else { 70 };
         let pct_y = if area.height < 30 { 90 } else { 70 };
-        let inner = modal::render_modal(frame, area, title, pct_x, pct_y);
+        let inner = modal::render_modal_themed(frame, area, title, pct_x, pct_y, Some(&s));
 
-        let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let key_style = Style::default().fg(s.accent).add_modifier(Modifier::BOLD);
 
         let bindings = self.bindings();
         let mut lines: Vec<Line> = Vec::with_capacity(bindings.len() + 2);
@@ -122,7 +133,7 @@ impl Component for HelpOverlay {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " Press any key to close",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(s.muted),
         )));
 
         frame.render_widget(Paragraph::new(lines), inner);

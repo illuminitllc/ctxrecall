@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use uuid::Uuid;
 
+use crate::config::theme::Theme;
 use crate::errors::AppError;
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,24 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<(), AppEr
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
         [key, value],
     )?;
+    Ok(())
+}
+
+pub fn list_config_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>, AppError> {
+    let mut stmt = conn.prepare("SELECT key, value FROM config WHERE key LIKE ?1")?;
+    let pattern = format!("{prefix}%");
+    let rows = stmt.query_map([&pattern], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn delete_config(conn: &Connection, key: &str) -> Result<(), AppError> {
+    conn.execute("DELETE FROM config WHERE key = ?1", [key])?;
     Ok(())
 }
 
@@ -157,4 +176,26 @@ pub fn get_account_llm_config(conn: &Connection, account_id: &str) -> (Option<St
     let model = get_config(conn, &format!("llm_model:{account_id}")).ok().flatten();
     let ollama_url = get_config(conn, &format!("llm_ollama_url:{account_id}")).ok().flatten();
     (model, ollama_url)
+}
+
+// ── Theme persistence ──
+
+pub fn get_active_theme(conn: &Connection) -> Option<Theme> {
+    let mut stmt = conn
+        .prepare("SELECT data FROM themes WHERE is_active = 1 LIMIT 1")
+        .ok()?;
+    let json: String = stmt.query_row([], |row| row.get(0)).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+pub fn set_active_theme(conn: &Connection, name: &str, theme: &Theme) -> Result<(), AppError> {
+    let json = serde_json::to_string(theme)
+        .map_err(|e| AppError::Config(format!("Failed to serialize theme: {e}")))?;
+    conn.execute("UPDATE themes SET is_active = 0", [])?;
+    conn.execute(
+        "INSERT INTO themes (name, data, is_active) VALUES (?1, ?2, 1)
+         ON CONFLICT(name) DO UPDATE SET data = ?2, is_active = 1",
+        rusqlite::params![name, json],
+    )?;
+    Ok(())
 }

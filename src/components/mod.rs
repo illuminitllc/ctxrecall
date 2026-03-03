@@ -18,6 +18,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::action::Action;
+use crate::config::theme::Theme;
 
 pub trait Component {
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Action> {
@@ -30,5 +31,5 @@ pub trait Component {
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect);
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme);
 }

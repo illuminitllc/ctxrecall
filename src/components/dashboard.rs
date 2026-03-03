@@ -1,10 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::action::DashboardStats;
+use crate::config::theme::Theme;
 
 use super::Component;
 
@@ -25,11 +26,12 @@ impl Dashboard {
 }
 
 impl Component for Dashboard {
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let s = theme.styles();
         let block = Block::default()
             .title(" Dashboard ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(s.border));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -41,9 +43,9 @@ impl Component for Dashboard {
         .split(inner);
 
         let bold = Style::default().add_modifier(Modifier::BOLD);
-        let dim = Style::default().fg(Color::DarkGray);
-        let cyan = Style::default().fg(Color::Cyan);
-        let green = Style::default().fg(Color::Green);
+        let dim = Style::default().fg(s.muted);
+        let accent = Style::default().fg(s.accent);
+        let success = Style::default().fg(s.success);
 
         // Left column: Issue stats
         let issue_lines = vec![
@@ -51,11 +53,11 @@ impl Component for Dashboard {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Open:       ", dim),
-                Span::styled(self.stats.open_count.to_string(), cyan),
+                Span::styled(self.stats.open_count.to_string(), accent),
             ]),
             Line::from(vec![
                 Span::styled("  Closed (7d): ", dim),
-                Span::styled(self.stats.closed_7d_count.to_string(), green),
+                Span::styled(self.stats.closed_7d_count.to_string(), success),
             ]),
         ];
         frame.render_widget(Paragraph::new(issue_lines), cols[0]);
@@ -82,14 +84,14 @@ impl Component for Dashboard {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Total:    ", dim),
-                Span::styled(self.stats.total_sessions.to_string(), cyan),
+                Span::styled(self.stats.total_sessions.to_string(), accent),
             ]),
             Line::from(vec![
                 Span::styled("  Active:   ", dim),
                 Span::styled(
                     active_str.to_string(),
                     if self.stats.active_session.is_some() {
-                        green
+                        success
                     } else {
                         dim
                     },

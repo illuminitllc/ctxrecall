@@ -1,11 +1,12 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::action::Action;
+use crate::config::theme::{Theme, ThemeStyles};
 use crate::tracker::types::Issue;
 
 use super::Component;
@@ -37,15 +38,15 @@ impl IssueDetail {
         self.issue.as_ref()
     }
 
-    fn render_content(&self, width: u16) -> Text<'_> {
+    fn render_content_themed(&self, width: u16, s: &ThemeStyles) -> Text<'_> {
         let issue = match &self.issue {
             Some(i) => i,
             None => return Text::raw("No issue selected"),
         };
 
         let bold = Style::default().add_modifier(Modifier::BOLD);
-        let dim = Style::default().fg(Color::DarkGray);
-        let cyan = Style::default().fg(Color::Cyan);
+        let dim = Style::default().fg(s.muted);
+        let accent = Style::default().fg(s.accent);
 
         let mut lines = if width < 60 {
             // Compact layout for narrow panes
@@ -54,16 +55,16 @@ impl IssueDetail {
 
             let mut l = vec![
                 Line::from(vec![
-                    Span::styled(&issue.identifier, cyan),
+                    Span::styled(&issue.identifier, accent),
                     Span::raw("  "),
                     Span::raw(&issue.title),
                 ]),
                 Line::from(vec![
-                    Span::styled(&issue.status, Style::default().fg(Color::Yellow)),
+                    Span::styled(&issue.status, Style::default().fg(s.warning)),
                     Span::raw(" · "),
                     Span::raw(priority_label(issue.priority)),
                     Span::raw(" · "),
-                    Span::styled(assignee, Style::default().fg(Color::Magenta)),
+                    Span::styled(assignee, Style::default().fg(s.accent)),
                     Span::raw(" · "),
                     Span::raw(team),
                 ]),
@@ -89,7 +90,7 @@ impl IssueDetail {
                     dim,
                 ),
                 Span::styled(" · ", dim),
-                Span::styled(&issue.url, Style::default().fg(Color::Blue)),
+                Span::styled(&issue.url, Style::default().fg(s.border)),
             ]));
             l
         } else {
@@ -97,7 +98,7 @@ impl IssueDetail {
             let mut l = vec![
                 Line::from(vec![
                     Span::styled("Identifier: ", bold),
-                    Span::styled(&issue.identifier, cyan),
+                    Span::styled(&issue.identifier, accent),
                 ]),
                 Line::from(""),
                 Line::from(vec![
@@ -137,7 +138,7 @@ impl IssueDetail {
             l.push(Line::from(""));
             l.push(Line::from(vec![
                 Span::styled("URL: ", bold),
-                Span::styled(&issue.url, Style::default().fg(Color::Blue)),
+                Span::styled(&issue.url, Style::default().fg(s.border)),
             ]));
 
             l.push(Line::from(""));
@@ -160,7 +161,7 @@ impl IssueDetail {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "─── Description ───",
-            Style::default().fg(Color::Blue),
+            Style::default().fg(s.border),
         )));
         lines.push(Line::from(""));
 
@@ -189,6 +190,16 @@ fn priority_label(p: i32) -> &'static str {
 
 impl Component for IssueDetail {
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Action> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('d') => self.issue.as_ref().map(|i| Action::SetStatus(i.id.clone(), "Done".into())),
+                KeyCode::Char('b') => self.issue.as_ref().map(|i| Action::SetStatus(i.id.clone(), "Backlog".into())),
+                KeyCode::Char('t') => self.issue.as_ref().map(|i| Action::SetStatus(i.id.clone(), "Todo".into())),
+                KeyCode::Char('i') => self.issue.as_ref().map(|i| Action::SetStatus(i.id.clone(), "In Progress".into())),
+                _ => None,
+            };
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::Back),
             KeyCode::Char('j') | KeyCode::Down => {
@@ -230,7 +241,8 @@ impl Component for IssueDetail {
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let s = theme.styles();
         let title = self
             .issue
             .as_ref()
@@ -240,12 +252,12 @@ impl Component for IssueDetail {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(s.accent));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let content = self.render_content(inner.width);
+        let content = self.render_content_themed(inner.width, &s);
         let paragraph = Paragraph::new(content)
             .wrap(Wrap { trim: false })
             .scroll((self.scroll, 0));
