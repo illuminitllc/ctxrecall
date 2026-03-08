@@ -15,6 +15,7 @@ use crate::claude::session::ClaudeManager;
 use crate::claude::transcript::TranscriptCaptureHandle;
 use crate::components::Component;
 use crate::components::account_picker::AccountPicker;
+use crate::components::branch_picker::BranchPicker;
 use crate::components::command_palette::CommandPalette;
 use crate::components::dashboard::Dashboard;
 use crate::components::document_viewer::DocumentViewer;
@@ -69,6 +70,7 @@ pub struct App {
     dashboard: Dashboard,
     help_overlay: HelpOverlay,
     filter_picker: FilterPicker,
+    branch_picker: BranchPicker,
     account_picker: AccountPicker,
     focus: FocusPanel,
     bottom_panel: BottomPanel,
@@ -192,6 +194,7 @@ impl App {
             dashboard: Dashboard::new(),
             help_overlay: HelpOverlay::new(),
             filter_picker: FilterPicker::new(),
+            branch_picker: BranchPicker::new(),
             account_picker: AccountPicker::new(),
             focus: FocusPanel::IssueList,
             bottom_panel: BottomPanel::Dashboard,
@@ -321,6 +324,9 @@ impl App {
         }
         if self.filter_picker.is_visible() {
             return self.filter_picker.handle_key_event(key);
+        }
+        if self.branch_picker.is_visible() {
+            return self.branch_picker.handle_key_event(key);
         }
         if self.document_viewer.is_visible() {
             return self.document_viewer.handle_key_event(key);
@@ -507,10 +513,12 @@ impl App {
         match action {
             Action::Quit => self.running = false,
             Action::ShowIssueDetail(issue) => {
+                let issue_id = issue.id.clone();
                 self.issue_detail.set_issue(issue);
                 self.bottom_panel = BottomPanel::IssueDetail;
                 self.focus = FocusPanel::DetailPanel;
                 self.status_bar.set_context("detail");
+                self.refresh_branch_info(&issue_id);
             }
             Action::Back => {
                 if self.bottom_panel == BottomPanel::IssueDetail {
@@ -885,10 +893,76 @@ impl App {
                     }
                 }
             }
+            Action::OpenBranchPicker(issue_id) => {
+                let issue = self.issue_list.all_issues().iter().find(|i| i.id == issue_id).cloned();
+                let working_dir = issue.as_ref().and_then(|i| self.resolve_working_dir(i));
+                let branches = working_dir
+                    .as_ref()
+                    .and_then(|dir| crate::git::list_branches(dir).ok())
+                    .unwrap_or_default();
+                if branches.is_empty() && working_dir.is_none() {
+                    let _ = self.action_tx.send(Action::Error(
+                        "No directory mapped for this issue's project/team".into(),
+                    ));
+                } else {
+                    let current = db::branch_repo::get_branch(&self.db_conn, &issue_id).ok().flatten();
+                    // Pre-populate with issue identifier slug when no branch is assigned yet
+                    let hint = if current.is_none() {
+                        issue.as_ref().map(|i| i.identifier.to_lowercase())
+                    } else {
+                        None
+                    };
+                    self.branch_picker.show(issue_id, branches, current, hint);
+                }
+            }
+            Action::SetBranch(issue_id, branch) => {
+                if let Err(e) = db::branch_repo::set_branch(&self.db_conn, &issue_id, &branch) {
+                    let _ = self.action_tx.send(Action::Error(format!("Failed to set branch: {e}")));
+                } else {
+                    let _ = self.action_tx.send(Action::StatusMessage(format!("Branch: {branch}")));
+                    self.refresh_branch_info(&issue_id);
+                }
+            }
+            Action::ClearBranch(issue_id) => {
+                if let Err(e) = db::branch_repo::clear_branch(&self.db_conn, &issue_id) {
+                    let _ = self.action_tx.send(Action::Error(format!("Failed to clear branch: {e}")));
+                } else {
+                    let _ = self.action_tx.send(Action::StatusMessage("Branch cleared".into()));
+                    self.issue_detail.set_branch_info(None);
+                }
+            }
+            Action::CreateAndSetBranch(issue_id, branch) => {
+                let issue = self.issue_list.all_issues().iter().find(|i| i.id == issue_id).cloned();
+                let working_dir = issue.as_ref().and_then(|i| self.resolve_working_dir(i));
+                if let Some(dir) = &working_dir {
+                    match crate::git::create_branch(dir, &branch) {
+                        Ok(()) => {
+                            if let Err(e) = db::branch_repo::set_branch(&self.db_conn, &issue_id, &branch) {
+                                let _ = self.action_tx.send(Action::Error(format!("Branch created but failed to save: {e}")));
+                            } else {
+                                let _ = self.action_tx.send(Action::StatusMessage(format!("Created branch: {branch}")));
+                                self.refresh_branch_info(&issue_id);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = self.action_tx.send(Action::Error(format!("Failed to create branch: {e}")));
+                        }
+                    }
+                } else {
+                    let _ = self.action_tx.send(Action::Error("No directory mapped for this issue".into()));
+                }
+            }
             Action::Refresh => {
                 let _ = self
                     .action_tx
                     .send(Action::StatusMessage("Refreshing...".into()));
+                if let Some(tracker) = self.tracker.clone() {
+                    let tx = self.action_tx.clone();
+                    tokio::spawn(async move {
+                        let sync = SyncManager::new(tracker, tx);
+                        sync.fetch_all().await;
+                    });
+                }
             }
             _ => {}
         }
@@ -1128,6 +1202,28 @@ impl App {
         None
     }
 
+    fn refresh_branch_info(&mut self, issue_id: &str) {
+        let branch = db::branch_repo::get_branch(&self.db_conn, issue_id).ok().flatten();
+        if let Some(ref branch_name) = branch {
+            let issue = self.issue_list.all_issues().iter().find(|i| i.id == issue_id).cloned();
+            let working_dir = issue.as_ref().and_then(|i| self.resolve_working_dir(i));
+            if let Some(dir) = &working_dir {
+                match crate::git::get_branch_status(dir, branch_name) {
+                    Ok(status) => {
+                        self.issue_detail.set_branch_info(Some(status.display_string(branch_name)));
+                    }
+                    Err(_) => {
+                        self.issue_detail.set_branch_info(Some(branch_name.clone()));
+                    }
+                }
+            } else {
+                self.issue_detail.set_branch_info(Some(branch_name.clone()));
+            }
+        } else {
+            self.issue_detail.set_branch_info(None);
+        }
+    }
+
     fn launch_claude(&mut self, issue_id: &str) {
         // Create Claude pane on demand if we're in tmux but haven't split yet
         if self.claude.is_none() {
@@ -1246,7 +1342,8 @@ impl App {
             .map(|dir| load_project_docs(std::path::Path::new(dir)))
             .unwrap_or_default();
 
-        let Some(prompt) = build_context_prompt(&issue, &summaries, &documents, &project_docs) else {
+        let branch = db::branch_repo::get_branch(&self.db_conn, issue_id).ok().flatten();
+        let Some(prompt) = build_context_prompt(&issue, &summaries, &documents, &project_docs, branch.as_deref()) else {
             tracing::debug!("No context to inject for {}", issue.identifier);
             return;
         };
@@ -1336,6 +1433,7 @@ impl App {
             self.transcript_viewer.render(frame, frame.area(), theme);
             self.document_viewer.render(frame, frame.area(), theme);
             self.filter_picker.render(frame, frame.area(), theme);
+            self.branch_picker.render(frame, frame.area(), theme);
             self.search.render(frame, frame.area(), theme);
             self.settings.render(frame, frame.area(), theme);
             self.account_picker.render(frame, frame.area(), theme);

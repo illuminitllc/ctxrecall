@@ -89,4 +89,10 @@ pub enum Action {
 
     // Theme
     SetTheme(String), // theme name
+
+    // Branch tracking
+    OpenBranchPicker(String),              // issue_id
+    SetBranch(String, String),             // (issue_id, branch_name)
+    ClearBranch(String),                   // issue_id
+    CreateAndSetBranch(String, String),    // (issue_id, branch_name)
 }

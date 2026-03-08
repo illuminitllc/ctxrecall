@@ -6,6 +6,7 @@ mod components;
 mod db;
 mod errors;
 mod event;
+mod git;
 mod logging;
 mod tmux;
 mod tracker;

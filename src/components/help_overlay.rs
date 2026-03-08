@@ -78,6 +78,7 @@ impl HelpOverlay {
                 ("p", "Filter by project"),
                 ("n", "New issue"),
                 ("a", "Switch account"),
+                ("b", "Set git branch"),
                 ("c", "Launch Claude session"),
                 ("T", "View transcripts"),
                 ("d", "View documents"),

@@ -1,4 +1,5 @@
 pub mod account_picker;
+pub mod branch_picker;
 pub mod command_palette;
 pub mod dashboard;
 pub mod document_viewer;

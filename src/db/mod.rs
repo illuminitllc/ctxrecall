@@ -1,3 +1,4 @@
+pub mod branch_repo;
 pub mod config_repo;
 pub mod document_repo;
 pub mod issue_repo;
@@ -70,6 +71,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "015_add_nord_last_horizon_themes",
         include_str!("../../migrations/015_add_nord_last_horizon_themes.sql"),
+    ),
+    (
+        "016_issue_branches",
+        include_str!("../../migrations/016_issue_branches.sql"),
     ),
 ];
 

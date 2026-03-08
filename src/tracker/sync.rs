@@ -35,7 +35,7 @@ impl SyncManager {
         })
     }
 
-    async fn fetch_all(&self) {
+    pub async fn fetch_all(&self) {
         self.fetch_issues().await;
         self.fetch_workflow_states().await;
         self.fetch_teams().await;

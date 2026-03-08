@@ -62,6 +62,7 @@ pub fn build_context_prompt(
     summaries: &[String],
     documents: &[Document],
     project_docs: &[(String, String)],
+    branch: Option<&str>,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -81,6 +82,9 @@ pub fn build_context_prompt(
     }
     if !issue.labels.is_empty() {
         meta.push_str(&format!(" | **Labels:** {}", issue.labels.join(", ")));
+    }
+    if let Some(branch_name) = branch {
+        meta.push_str(&format!(" | **Branch:** {branch_name}"));
     }
     parts.push(meta);
 
@@ -147,6 +151,14 @@ pub fn build_context_prompt(
         parts.push(section);
     }
 
+    if let Some(branch_name) = branch {
+        parts.push(format!(
+            "## Git Branch\nThis issue is tracked on branch `{branch_name}`. \
+             Please verify you are on this branch before making changes. \
+             If not, switch to it with `git checkout {branch_name}`."
+        ));
+    }
+
     // Nothing beyond the identifier/title? Skip injection.
     if parts.len() <= 1 && issue.description.as_ref().map_or(true, |d| d.trim().is_empty()) {
         return None;
@@ -203,7 +215,7 @@ mod tests {
     #[test]
     fn builds_prompt_with_description() {
         let issue = test_issue();
-        let result = build_context_prompt(&issue, &[], &[], &[]);
+        let result = build_context_prompt(&issue, &[], &[], &[], None);
         assert!(result.is_some());
         let prompt = result.unwrap();
         assert!(prompt.contains("ENG-42"));
@@ -216,7 +228,7 @@ mod tests {
     fn returns_none_for_empty_issue() {
         let mut issue = test_issue();
         issue.description = None;
-        let result = build_context_prompt(&issue, &[], &[], &[]);
+        let result = build_context_prompt(&issue, &[], &[], &[], None);
         assert!(result.is_none());
     }
 
@@ -234,7 +246,7 @@ mod tests {
             updated_at: String::new(),
             file_path: None,
         }];
-        let result = build_context_prompt(&issue, &summaries, &docs, &[]);
+        let result = build_context_prompt(&issue, &summaries, &docs, &[], None);
         let prompt = result.unwrap();
         assert!(prompt.contains("Session 1"));
         assert!(prompt.contains("Summary of session 1"));

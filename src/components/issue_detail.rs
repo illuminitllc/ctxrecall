@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -14,6 +14,7 @@ use super::Component;
 pub struct IssueDetail {
     issue: Option<Issue>,
     scroll: u16,
+    branch_info: Option<String>,
 }
 
 impl IssueDetail {
@@ -21,17 +22,24 @@ impl IssueDetail {
         Self {
             issue: None,
             scroll: 0,
+            branch_info: None,
         }
     }
 
     pub fn set_issue(&mut self, issue: Issue) {
         self.issue = Some(issue);
         self.scroll = 0;
+        self.branch_info = None;
     }
 
     pub fn clear(&mut self) {
         self.issue = None;
         self.scroll = 0;
+        self.branch_info = None;
+    }
+
+    pub fn set_branch_info(&mut self, info: Option<String>) {
+        self.branch_info = info;
     }
 
     pub fn current_issue(&self) -> Option<&Issue> {
@@ -225,6 +233,9 @@ impl Component for IssueDetail {
             KeyCode::Char('s') => {
                 self.issue.as_ref().map(|i| Action::CycleStatus(i.id.clone()))
             }
+            KeyCode::Char('b') => {
+                self.issue.as_ref().map(|i| Action::OpenBranchPicker(i.id.clone()))
+            }
             KeyCode::Char('h') => Some(Action::ShowHelp),
             KeyCode::Char('/') => Some(Action::OpenSearch),
             KeyCode::Char('r') => Some(Action::Refresh),
@@ -249,10 +260,20 @@ impl Component for IssueDetail {
             .map(|i| format!(" {} - {} ", i.identifier, i.title))
             .unwrap_or_else(|| " Issue Detail ".to_string());
 
-        let block = Block::default()
+        let mut block = Block::default()
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(s.accent));
+
+        if let Some(ref info) = self.branch_info {
+            let branch_title = Line::from(vec![
+                Span::styled(
+                    format!("  {info} "),
+                    Style::default().fg(s.success),
+                ),
+            ]);
+            block = block.title(branch_title.alignment(Alignment::Right));
+        }
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
