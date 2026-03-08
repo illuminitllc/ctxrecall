@@ -9,6 +9,7 @@ repository = "https://github.com/illuminitllc/ctxrecall"
 readme = "README.md"
 keywords = ["tui", "linear", "issue-tracker", "claude", "project-management"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [".codegraph/"]
 
 [[bin]]
 name = "ctxrec"
