@@ -2,6 +2,10 @@
 
 A terminal UI issue manager with Claude Code integration. Syncs with Linear, launches Claude sessions with rich issue context, captures transcripts, and summarizes them with pluggable LLM providers.
 
+![MainScreen](https://github.com/user-attachments/assets/8e58a478-cb8d-40ad-8c54-1efc88e632d9)
+![ProjectSelector](https://github.com/user-attachments/assets/d1d88255-258e-4353-85fd-7a1835de2f69)
+![ClaudeIntegration](https://github.com/user-attachments/assets/489ec330-95b2-4931-b147-7d2513effc25)
+
 ## Features
 
 - **Linear sync** — background sync of issues, teams, projects, labels, and workflow states via GraphQL
