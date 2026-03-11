@@ -202,3 +202,14 @@ pub fn load_workflow_states(conn: &Connection) -> Result<Vec<IssueStatus>, AppEr
 
     Ok(states)
 }
+
+pub fn clear_all_cached(conn: &Connection) -> Result<(), AppError> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issues", [])?;
+    tx.execute("DELETE FROM teams", [])?;
+    tx.execute("DELETE FROM projects", [])?;
+    tx.execute("DELETE FROM labels", [])?;
+    tx.execute("DELETE FROM workflow_states", [])?;
+    tx.commit()?;
+    Ok(())
+}

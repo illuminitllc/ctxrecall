@@ -789,11 +789,38 @@ impl App {
                 }
             }
             Action::DeleteAccount(id) => {
+                // Check provider before deleting so we know if it's Linear
+                let is_linear = db::config_repo::get_account(&self.db_conn, &id)
+                    .ok()
+                    .flatten()
+                    .map_or(false, |a| a.provider == "linear");
+
                 if let Err(e) = db::config_repo::delete_account(&self.db_conn, &id) {
                     let _ = self.action_tx.send(Action::Error(format!("Failed to delete account: {e}")));
                 } else {
                     let _ = self.action_tx.send(Action::StatusMessage("Account deleted".into()));
                     let _ = self.action_tx.send(Action::LoadAccounts);
+
+                    if is_linear {
+                        // Stop sync and clear cached issues/teams/projects/labels
+                        if let Some(handle) = self.sync_handle.take() {
+                            handle.abort();
+                        }
+                        self.tracker = None;
+                        if let Err(e) = db::issue_repo::clear_all_cached(&self.db_conn) {
+                            tracing::error!("Failed to clear cached data: {e}");
+                        }
+                        // Reset in-memory state
+                        self.issue_list.update(&Action::IssuesLoaded(Vec::new()));
+                        self.teams.clear();
+                        self.projects.clear();
+                        self.labels.clear();
+                        self.issue_detail.clear();
+                        self.bottom_panel = BottomPanel::Dashboard;
+                        self.focus = FocusPanel::IssueList;
+                        self.status_bar.set_context("list");
+                    }
+
                     // Restart summarizer in case active LLM provider was deleted
                     self.restart_summarizer();
                 }
